@@ -41,30 +41,27 @@ type Marker struct {
 
 // DetectBytes detects known HDR/gain-map image structures without native dependencies.
 //
-// This Milestone 1 detector intentionally detects only container/metadata signals; it
-// does not decode pixels or generate thumbnails.
+// This detector intentionally avoids classifying a container or MIME type as HDR
+// unless HDR/gain-map metadata is present; it does not decode pixels or generate thumbnails.
 func DetectBytes(input []byte, contentType string) (Detection, error) {
 	contentType = normalizeContentType(contentType)
-
-	switch contentType {
-	case "image/avif":
-		return Detection{Kind: KindHDRAVIF, ContentType: contentType, Evidence: []string{"image/avif content type"}}, nil
-	case "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence":
-		return Detection{Kind: KindHDRHEIC, ContentType: contentType, Evidence: []string{contentType + " content type"}}, nil
-	case "image/jxl":
-		return Detection{Kind: KindHDRJXL, ContentType: contentType, Evidence: []string{"image/jxl content type"}}, nil
-	}
 
 	if len(input) >= 3 && bytes.Equal(input[:3], []byte{0xff, 0xd8, 0xff}) {
 		return detectJPEG(input)
 	}
 
-	if kind, evidence, ok := detectISOBMFF(input); ok {
-		return Detection{Kind: kind, ContentType: contentTypeForKind(kind), Evidence: []string{evidence}}, nil
+	if detectedContentType, ok := detectISOBMFFContentType(input); ok {
+		if contentType == "" {
+			contentType = detectedContentType
+		}
+		return Detection{Kind: KindNone, ContentType: contentType}, nil
 	}
 
 	if isJXL(input) {
-		return Detection{Kind: KindHDRJXL, ContentType: "image/jxl", Evidence: []string{"JPEG XL signature present"}}, nil
+		if contentType == "" {
+			contentType = "image/jxl"
+		}
+		return Detection{Kind: KindNone, ContentType: contentType}, nil
 	}
 
 	if contentType == "" {
@@ -169,9 +166,9 @@ func detectJPEG(data []byte) (Detection, error) {
 	return res, nil
 }
 
-func detectISOBMFF(data []byte) (Kind, string, bool) {
+func detectISOBMFFContentType(data []byte) (string, bool) {
 	if len(data) < 12 || string(data[4:8]) != "ftyp" {
-		return KindNone, "", false
+		return "", false
 	}
 	brands := []string{string(data[8:12])}
 	for pos := 16; pos+4 <= len(data) && pos < 128; pos += 4 {
@@ -180,30 +177,19 @@ func detectISOBMFF(data []byte) (Kind, string, bool) {
 	for _, brand := range brands {
 		switch brand {
 		case "avif", "avis":
-			return KindHDRAVIF, "ISO BMFF ftyp " + brand + " brand present", true
-		case "heic", "heix", "hevc", "hevx", "mif1", "msf1":
-			return KindHDRHEIC, "ISO BMFF ftyp " + brand + " brand present", true
+			return "image/avif", true
+		case "heic", "heix", "hevc", "hevx":
+			return "image/heic", true
+		case "mif1", "msf1":
+			return "image/heif", true
 		}
 	}
-	return KindNone, "", false
+	return "", false
 }
 
 func isJXL(data []byte) bool {
 	return len(data) >= 2 && data[0] == 0xff && data[1] == 0x0a ||
 		len(data) >= 12 && bytes.Equal(data[:12], []byte{0x00, 0x00, 0x00, 0x0c, 'J', 'X', 'L', ' ', 0x0d, 0x0a, 0x87, 0x0a})
-}
-
-func contentTypeForKind(kind Kind) string {
-	switch kind {
-	case KindHDRAVIF:
-		return "image/avif"
-	case KindHDRHEIC:
-		return "image/heic"
-	case KindHDRJXL:
-		return "image/jxl"
-	default:
-		return "application/octet-stream"
-	}
 }
 
 func normalizeContentType(contentType string) string {

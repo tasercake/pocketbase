@@ -957,7 +957,7 @@ func TestFileSystemCreateThumb(t *testing.T) {
 	}
 }
 
-func TestFileSystemCreateThumbWithOptionsHDRRequireUnavailable(t *testing.T) {
+func TestFileSystemCreateThumbWithOptionsHDRRequirePlainAVIFDoesNotUseHDRBackend(t *testing.T) {
 	dir := createTestDir(t)
 	defer os.RemoveAll(dir)
 
@@ -967,16 +967,56 @@ func TestFileSystemCreateThumbWithOptionsHDRRequireUnavailable(t *testing.T) {
 	}
 	defer fsys.Close()
 
-	original := []byte("avif hdr source bytes")
-	if err := fsys.Upload(original, "hdr.avif"); err != nil {
+	original := []byte("avif sdr source bytes")
+	if err := fsys.Upload(original, "sdr.avif"); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = fsys.CreateThumbWithOptions("hdr.avif", "thumbs_hdr_hdr.avif/100x100_hdr.avif", filesystem.ThumbOptions{
+	_, err = fsys.CreateThumbWithOptions("sdr.avif", "thumbs_sdr.avif/100x100_sdr.avif", filesystem.ThumbOptions{
 		Size:              "100x100",
 		HdrEnabled:        true,
 		HdrPolicy:         "require",
 		SourceContentType: "image/avif",
+	})
+	if err == nil {
+		t.Fatal("Expected regular decoder error for invalid AVIF fixture, got nil")
+	}
+	if errors.Is(err, hdrthumb.ErrHDRRequired) || errors.Is(err, hdrthumb.ErrHDRBackendUnavailable) || errors.Is(err, hdrthumb.ErrUnsupportedHDRKind) {
+		t.Fatalf("Expected plain AVIF to avoid HDR backend errors, got %v", err)
+	}
+
+	if exists, _ := fsys.Exists("thumbs_sdr.avif/100x100_sdr.avif"); exists {
+		t.Fatal("Thumb should not be written for invalid AVIF fixture")
+	}
+}
+
+func TestFileSystemCreateThumbWithOptionsHDRRequireUnavailable(t *testing.T) {
+	if hdrthumb.Available() {
+		t.Skip("HDR backend is available in this build")
+	}
+
+	dir := createTestDir(t)
+	defer os.RemoveAll(dir)
+
+	fsys, err := filesystem.NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+
+	original, err := os.ReadFile(filepath.Join("..", "..", "tests", "data", "hdr", "current-photo-1.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.Upload(original, "hdr.jpg"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = fsys.CreateThumbWithOptions("hdr.jpg", "thumbs_hdr_hdr.jpg/100x100_hdr.jpg", filesystem.ThumbOptions{
+		Size:              "100x100",
+		HdrEnabled:        true,
+		HdrPolicy:         "require",
+		SourceContentType: "image/jpeg",
 	})
 	if err == nil {
 		t.Fatal("Expected HDR required error, got nil")
@@ -985,11 +1025,11 @@ func TestFileSystemCreateThumbWithOptionsHDRRequireUnavailable(t *testing.T) {
 		t.Fatalf("Expected HDR required backend unavailable/unsupported error, got %v", err)
 	}
 
-	if exists, _ := fsys.Exists("thumbs_hdr_hdr.avif/100x100_hdr.avif"); exists {
+	if exists, _ := fsys.Exists("thumbs_hdr_hdr.jpg/100x100_hdr.jpg"); exists {
 		t.Fatal("HDR thumb should not be written when backend is unavailable")
 	}
 
-	r, err := fsys.GetReader("hdr.avif")
+	r, err := fsys.GetReader("hdr.jpg")
 	if err != nil {
 		t.Fatal(err)
 	}

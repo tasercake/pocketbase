@@ -56,16 +56,15 @@ func TestDetectBytesPlainJPEGIsNotHDR(t *testing.T) {
 	}
 }
 
-func TestDetectBytesMIMEClaimsHDRContainers(t *testing.T) {
+func TestDetectBytesMIMEOnlyContainersAreNotHDR(t *testing.T) {
 	tests := []struct {
 		name        string
 		contentType string
-		want        Kind
 	}{
-		{name: "avif", contentType: "image/avif; charset=binary", want: KindHDRAVIF},
-		{name: "heic", contentType: "image/heic", want: KindHDRHEIC},
-		{name: "heif", contentType: "image/heif", want: KindHDRHEIC},
-		{name: "jxl", contentType: "image/jxl", want: KindHDRJXL},
+		{name: "avif", contentType: "image/avif; charset=binary"},
+		{name: "heic", contentType: "image/heic"},
+		{name: "heif", contentType: "image/heif"},
+		{name: "jxl", contentType: "image/jxl"},
 	}
 
 	for _, tt := range tests {
@@ -74,26 +73,26 @@ func TestDetectBytesMIMEClaimsHDRContainers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Kind != tt.want {
-				t.Fatalf("DetectBytes() kind = %q, want %q", got.Kind, tt.want)
+			if got.Kind != KindNone {
+				t.Fatalf("DetectBytes() kind = %q, want %q; evidence: %#v", got.Kind, KindNone, got.Evidence)
 			}
-			if len(got.Evidence) == 0 {
-				t.Fatalf("DetectBytes() evidence is empty")
+			if len(got.Evidence) != 0 {
+				t.Fatalf("DetectBytes() evidence = %#v, want empty", got.Evidence)
 			}
 		})
 	}
 }
 
-func TestDetectBytesHDRContainerSignatures(t *testing.T) {
+func TestDetectBytesContainerSignaturesAreNotHDR(t *testing.T) {
 	tests := []struct {
-		name string
-		data []byte
-		want Kind
+		name            string
+		data            []byte
+		wantContentType string
 	}{
-		{name: "avif ftyp", data: isoBMFF("avif"), want: KindHDRAVIF},
-		{name: "heic ftyp", data: isoBMFF("heic"), want: KindHDRHEIC},
-		{name: "jxl codestream", data: []byte{0xff, 0x0a}, want: KindHDRJXL},
-		{name: "jxl container", data: []byte{0x00, 0x00, 0x00, 0x0c, 'J', 'X', 'L', ' ', 0x0d, 0x0a, 0x87, 0x0a}, want: KindHDRJXL},
+		{name: "avif ftyp", data: isoBMFF("avif"), wantContentType: "image/avif"},
+		{name: "heic ftyp", data: isoBMFF("heic"), wantContentType: "image/heic"},
+		{name: "jxl codestream", data: []byte{0xff, 0x0a}, wantContentType: "image/jxl"},
+		{name: "jxl container", data: []byte{0x00, 0x00, 0x00, 0x0c, 'J', 'X', 'L', ' ', 0x0d, 0x0a, 0x87, 0x0a}, wantContentType: "image/jxl"},
 	}
 
 	for _, tt := range tests {
@@ -102,11 +101,14 @@ func TestDetectBytesHDRContainerSignatures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Kind != tt.want {
-				t.Fatalf("DetectBytes() kind = %q, want %q; evidence: %#v", got.Kind, tt.want, got.Evidence)
+			if got.Kind != KindNone {
+				t.Fatalf("DetectBytes() kind = %q, want %q; evidence: %#v", got.Kind, KindNone, got.Evidence)
 			}
-			if len(got.Evidence) == 0 {
-				t.Fatalf("DetectBytes() evidence is empty")
+			if got.ContentType != tt.wantContentType {
+				t.Fatalf("DetectBytes() ContentType = %q, want %q", got.ContentType, tt.wantContentType)
+			}
+			if len(got.Evidence) != 0 {
+				t.Fatalf("DetectBytes() evidence = %#v, want empty", got.Evidence)
 			}
 		})
 	}
