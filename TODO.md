@@ -37,11 +37,11 @@
 
 ## Milestone 4: Native HDR Backend and Deterministic Build
 
-- [ ] Add deterministic native dependency scripts under `scripts/hdrthumb/`.
-- [ ] Add build-tagged HDR backend stubs and disabled-backend behavior.
-- [ ] Build or wrap `libultrahdr` programmatically.
-- [ ] Implement first working HDR thumbnail generation path for detected fixture format.
-- [ ] Add HDR backend tests proving generated thumbnail remains HDR-capable.
+- [x] Add deterministic native dependency scripts under `scripts/hdrthumb/`.
+- [x] Add build-tagged HDR backend stubs and disabled-backend behavior.
+- [x] Build or wrap `libultrahdr` programmatically.
+- [x] Implement first working HDR thumbnail generation path for detected fixture format.
+- [x] Add HDR backend tests proving generated thumbnail remains HDR-capable.
 
 ## Milestone 5: Documentation and Deployment
 

@@ -15,6 +15,7 @@ import (
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
+	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 	"github.com/pocketbase/pocketbase/tools/types"
 )
 
@@ -539,6 +540,9 @@ func TestFileDownload(t *testing.T) {
 }
 
 func TestFileDownloadHDRRequiredNoFallbackOrHook(t *testing.T) {
+	if hdrthumb.Available() {
+		t.Skip("HDR backend is available in this build")
+	}
 	app, record, filename := setupHDRRequiredFileDownload(t)
 	defer app.Cleanup()
 
@@ -578,6 +582,9 @@ func TestFileDownloadHDRRequiredNoFallbackOrHook(t *testing.T) {
 }
 
 func TestFileDownloadHDRRequiredViewUsesSourceField(t *testing.T) {
+	if hdrthumb.Available() {
+		t.Skip("HDR backend is available in this build")
+	}
 	app, record, filename := setupHDRRequiredFileDownload(t)
 	defer app.Cleanup()
 

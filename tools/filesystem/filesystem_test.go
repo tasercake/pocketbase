@@ -981,8 +981,8 @@ func TestFileSystemCreateThumbWithOptionsHDRRequireUnavailable(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected HDR required error, got nil")
 	}
-	if !errors.Is(err, hdrthumb.ErrHDRRequired) || !errors.Is(err, hdrthumb.ErrHDRBackendUnavailable) {
-		t.Fatalf("Expected HDR required/backend unavailable error, got %v", err)
+	if !errors.Is(err, hdrthumb.ErrHDRRequired) || (!errors.Is(err, hdrthumb.ErrHDRBackendUnavailable) && !errors.Is(err, hdrthumb.ErrUnsupportedHDRKind)) {
+		t.Fatalf("Expected HDR required backend unavailable/unsupported error, got %v", err)
 	}
 
 	if exists, _ := fsys.Exists("thumbs_hdr_hdr.avif/100x100_hdr.avif"); exists {

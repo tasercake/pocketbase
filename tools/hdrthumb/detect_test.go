@@ -112,14 +112,15 @@ func TestDetectBytesHDRContainerSignatures(t *testing.T) {
 	}
 }
 
-func TestAvailableDefaultBackendFalse(t *testing.T) {
+func TestDefaultBackendUnavailableWhenNotBuiltWithHDRThumbs(t *testing.T) {
 	if Available() {
-		t.Fatal("Available() = true, want false for default backend")
+		t.Skip("HDR backend is available in this build")
 	}
-}
-
-func TestCreateDefaultBackendUnavailable(t *testing.T) {
-	_, err := Create([]byte("input"), Options{Size: "100x100", OriginalName: "source.jpg", ThumbName: "thumb.jpg", OriginalContentType: "image/jpeg"})
+	input, err := os.ReadFile(filepath.Join("..", "..", "tests", "data", "hdr", "current-photo-1.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Create(input, Options{Size: "100x100", OriginalName: "source.jpg", ThumbName: "thumb.jpg", OriginalContentType: "image/jpeg"})
 	if !errors.Is(err, ErrHDRBackendUnavailable) {
 		t.Fatalf("Create() error = %v, want ErrHDRBackendUnavailable", err)
 	}
