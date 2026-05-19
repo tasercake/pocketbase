@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -26,6 +27,11 @@ func init() {
 const FieldTypeFile = "file"
 
 const DefaultFileFieldMaxSize int64 = 5 << 20
+
+const (
+	FileFieldHdrThumbsPolicyOff     = "off"
+	FileFieldHdrThumbsPolicyRequire = "require"
+)
 
 var looseFilenameRegex = regexp.MustCompile(`^[^\./\\][^/\\]+$`)
 
@@ -125,6 +131,14 @@ type FileField struct {
 	//   - Wx0  (eg. 100x0)    - resize to W width preserving the aspect ratio
 	Thumbs []string `form:"thumbs" json:"thumbs"`
 
+	// HdrThumbs specifies whether the generated image thumbs should preserve HDR colors.
+	HdrThumbs bool `form:"hdrThumbs" json:"hdrThumbs"`
+
+	// HdrThumbsPolicy controls the HDR thumbnail generation behavior.
+	//
+	// The currently supported policies are "off" and "require".
+	HdrThumbsPolicy string `form:"hdrThumbsPolicy" json:"hdrThumbsPolicy"`
+
 	// Protected will require the users to provide a special file token to access the file.
 	//
 	// Note that by default all files are publicly accessible.
@@ -141,6 +155,26 @@ type FileField struct {
 // Type implements [Field.Type] interface method.
 func (f *FileField) Type() string {
 	return FieldTypeFile
+}
+
+// UnmarshalJSON implements [json.Unmarshaler] and normalizes the HDR thumbs settings.
+func (f *FileField) UnmarshalJSON(data []byte) error {
+	type alias FileField
+	aux := (*alias)(f)
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	f.normalizeHdrThumbsPolicy()
+
+	return nil
+}
+
+// MarshalJSON implements [json.Marshaler] and normalizes the HDR thumbs settings.
+func (f FileField) MarshalJSON() ([]byte, error) {
+	type alias FileField
+	f.normalizeHdrThumbsPolicy()
+	return json.Marshal(alias(f))
 }
 
 // GetId implements [Field.GetId] interface method.
@@ -224,6 +258,8 @@ func (f *FileField) DriverValue(record *Record) (driver.Value, error) {
 
 // ValidateSettings implements [Field.ValidateSettings] interface method.
 func (f *FileField) ValidateSettings(ctx context.Context, app App, collection *Collection) error {
+	f.normalizeHdrThumbsPolicy()
+
 	return validation.ValidateStruct(f,
 		validation.Field(&f.Id, validation.By(DefaultFieldIdValidationRule)),
 		validation.Field(&f.Name, validation.By(DefaultFieldNameValidationRule)),
@@ -233,6 +269,10 @@ func (f *FileField) ValidateSettings(ctx context.Context, app App, collection *C
 		validation.Field(&f.Thumbs, validation.Each(
 			validation.NotIn("0x0", "0x0t", "0x0b", "0x0f"),
 			validation.Match(filesystem.ThumbSizeRegex),
+		)),
+		validation.Field(&f.HdrThumbsPolicy, validation.In(
+			FileFieldHdrThumbsPolicyOff,
+			FileFieldHdrThumbsPolicyRequire,
 		)),
 	)
 }
@@ -304,6 +344,17 @@ func (f *FileField) ValidateValue(ctx context.Context, app App, record *Record) 
 	}
 
 	return nil
+}
+
+func (f *FileField) normalizeHdrThumbsPolicy() {
+	if f.HdrThumbsPolicy == "" {
+		f.HdrThumbsPolicy = FileFieldHdrThumbsPolicyOff
+		return
+	}
+
+	if !f.HdrThumbs && (f.HdrThumbsPolicy == FileFieldHdrThumbsPolicyOff || f.HdrThumbsPolicy == FileFieldHdrThumbsPolicyRequire) {
+		f.HdrThumbsPolicy = FileFieldHdrThumbsPolicyOff
+	}
 }
 
 func (f *FileField) maxSize() int64 {

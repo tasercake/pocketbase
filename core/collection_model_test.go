@@ -588,6 +588,22 @@ func TestCollectionUnmarshalJSON(t *testing.T) {
 			},
 		},
 		{
+			"old file field without HDR settings",
+			`{"type":"base","name":"test","fields":[{"type":"file","id":"test123","name":"document"}]}`,
+			func() *core.Collection {
+				return &core.Collection{}
+			},
+			[]string{
+				`"type":"base"`,
+				`"name":"test"`,
+				`"type":"file"`,
+				`"name":"document"`,
+				`"hdrThumbs":false`,
+				`"hdrThumbsPolicy":"off"`,
+			},
+			[]string{},
+		},
+		{
 			"existing (no default fields load)",
 			`{"type":"auth","name":"test","listRule":"1=2","authRule":"1=3","viewQuery":"abc"}`,
 			func() *core.Collection {

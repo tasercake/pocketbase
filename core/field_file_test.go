@@ -541,6 +541,75 @@ func TestFileFieldValidateSettings(t *testing.T) {
 			[]string{},
 		},
 		{
+			"zero HDR thumbs settings are normalized",
+			func() *core.FileField {
+				return &core.FileField{
+					Id:   "test",
+					Name: "test",
+				}
+			},
+			[]string{},
+		},
+		{
+			"disabled HDR thumbs with require policy is normalized",
+			func() *core.FileField {
+				return &core.FileField{
+					Id:              "test",
+					Name:            "test",
+					HdrThumbs:       false,
+					HdrThumbsPolicy: core.FileFieldHdrThumbsPolicyRequire,
+				}
+			},
+			[]string{},
+		},
+		{
+			"enabled HDR thumbs with empty policy is normalized",
+			func() *core.FileField {
+				return &core.FileField{
+					Id:        "test",
+					Name:      "test",
+					HdrThumbs: true,
+				}
+			},
+			[]string{},
+		},
+		{
+			"enabled HDR thumbs with require policy",
+			func() *core.FileField {
+				return &core.FileField{
+					Id:              "test",
+					Name:            "test",
+					HdrThumbs:       true,
+					HdrThumbsPolicy: core.FileFieldHdrThumbsPolicyRequire,
+				}
+			},
+			[]string{},
+		},
+		{
+			"invalid HDR thumbs policy",
+			func() *core.FileField {
+				return &core.FileField{
+					Id:              "test",
+					Name:            "test",
+					HdrThumbs:       true,
+					HdrThumbsPolicy: "optional",
+				}
+			},
+			[]string{"hdrThumbsPolicy"},
+		},
+		{
+			"invalid disabled HDR thumbs policy",
+			func() *core.FileField {
+				return &core.FileField{
+					Id:              "test",
+					Name:            "test",
+					HdrThumbs:       false,
+					HdrThumbsPolicy: "optional",
+				}
+			},
+			[]string{"hdrThumbsPolicy"},
+		},
+		{
 			"MaxSize > safe json int",
 			func() *core.FileField {
 				return &core.FileField{
@@ -596,6 +665,40 @@ func TestFileFieldValidateSettings(t *testing.T) {
 			errs := field.ValidateSettings(context.Background(), app, collection)
 
 			tests.TestValidationErrors(t, errs, s.expectErrors)
+		})
+	}
+}
+
+func TestFileFieldHdrThumbsPolicyJSON(t *testing.T) {
+	scenarios := []struct {
+		name           string
+		raw            string
+		expectedPolicy string
+	}{
+		{"old JSON without HDR settings", `{"id":"test","name":"test"}`, core.FileFieldHdrThumbsPolicyOff},
+		{"enabled with empty policy", `{"id":"test","name":"test","hdrThumbs":true}`, core.FileFieldHdrThumbsPolicyOff},
+		{"disabled with require policy", `{"id":"test","name":"test","hdrThumbs":false,"hdrThumbsPolicy":"require"}`, core.FileFieldHdrThumbsPolicyOff},
+		{"enabled with require policy", `{"id":"test","name":"test","hdrThumbs":true,"hdrThumbsPolicy":"require"}`, core.FileFieldHdrThumbsPolicyRequire},
+	}
+
+	for _, s := range scenarios {
+		t.Run(s.name, func(t *testing.T) {
+			field := &core.FileField{}
+			if err := json.Unmarshal([]byte(s.raw), field); err != nil {
+				t.Fatal(err)
+			}
+
+			if field.HdrThumbsPolicy != s.expectedPolicy {
+				t.Fatalf("Expected policy %q, got %q", s.expectedPolicy, field.HdrThumbsPolicy)
+			}
+
+			rawResult, err := json.Marshal(field)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(rawResult), `"hdrThumbsPolicy":"`+s.expectedPolicy+`"`) {
+				t.Fatalf("Expected marshaled policy %q in\n%s", s.expectedPolicy, rawResult)
+			}
 		})
 	}
 }

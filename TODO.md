@@ -18,11 +18,11 @@
 
 ## Milestone 2: File Field Policy and Admin UI
 
-- [ ] Extend `core.FileField` with HDR thumbnail policy fields.
-- [ ] Add defaulting/validation/backward-compatible import/export behavior.
-- [ ] Add Go tests for field policy validation and schema compatibility.
-- [ ] Add Admin UI controls for HDR policy on file fields.
-- [ ] Add/update UI metadata/help for new file-field options.
+- [x] Extend `core.FileField` with HDR thumbnail policy fields.
+- [x] Add defaulting/validation/backward-compatible import/export behavior.
+- [x] Add Go tests for field policy validation and schema compatibility.
+- [x] Add Admin UI controls for HDR policy on file fields.
+- [x] Add/update UI metadata/help for new file-field options.
 
 ## Milestone 3: Thumbnail Routing, Errors, Cache, and Storage
 
