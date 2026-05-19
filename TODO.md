@@ -59,5 +59,5 @@
 
 - [x] Push final implementation branch.
 - [x] Open GitHub PR.
-- [ ] Run one reviewer subagent to leave comments directly on the PR.
-- [ ] Address required PR review feedback.
+- [x] Run one reviewer subagent to leave comments directly on the PR.
+- [x] Address required PR review feedback.
