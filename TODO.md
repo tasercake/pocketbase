@@ -1,110 +1,63 @@
-# HDR Thumbnail Fork TODO
+# HDR Thumbnail Implementation TODO
 
-## Repository
+## Rules
 
-- [x] Fork `pocketbase/pocketbase` to `tasercake/pocketbase`.
-- [x] Clone fork to VM.
-- [x] Create branch `hdr-thumbnail-generation-plan`.
-- [x] Add initial implementation plan.
+- [ ] Do not edit `SCOPE.md`.
+- [ ] Do not edit `PLAN.md` except by explicit user/orchestrator instruction.
+- [ ] Implementation subagents must not edit this `TODO.md`.
+- [ ] Reviewer subagents must not edit files.
 
-## Source Investigation
+## Milestone 1: Fixtures and Detection
 
-- [x] Identify current thumbnail entrypoint: `apis/file.go`.
-- [x] Identify current thumbnail implementation: `tools/filesystem/filesystem.go`.
-- [x] Confirm current implementation uses `imaging.Decode/Resize/Encode`.
-- [x] Confirm current implementation cannot preserve/generate HDR gain-map thumbnails.
+- [ ] Select 2–3 HDR fixture images from current `tasercake-cms` `photos` collection.
+- [ ] Add fixture image files under `tests/data/hdr/`.
+- [ ] Add metadata snapshots under `tests/data/hdr/`.
+- [ ] Add `docs/hdr-thumbnails/fixture-analysis.md`.
+- [ ] Add pure-Go HDR detection package skeleton under `tools/hdrthumb/`.
+- [ ] Add pure-Go detector tests for fixture images.
 
-## HDR Sample Analysis
+## Milestone 2: File Field Policy and Admin UI
 
-- [ ] Select one uploaded photo known to display HDR.
-- [ ] Download original from PocketBase/R2.
-- [ ] Inspect with `exiftool`.
-- [ ] Write JPEG marker scanner for APP/XMP/MPF/gain-map data.
-- [ ] Determine exact HDR type: Ultra HDR, Apple gain map, Adobe gain map, HEIC/AVIF/JXL, or other.
-- [ ] Save detection notes under `docs/hdr-thumbnails/sample-analysis.md`.
+- [ ] Extend `core.FileField` with HDR thumbnail policy fields.
+- [ ] Add defaulting/validation/backward-compatible import/export behavior.
+- [ ] Add Go tests for field policy validation and schema compatibility.
+- [ ] Add Admin UI controls for HDR policy on file fields.
+- [ ] Add/update UI metadata/help for new file-field options.
 
-## Library Evaluation
+## Milestone 3: Thumbnail Routing, Errors, Cache, and Storage
 
-- [ ] Build/install `libultrahdr` on `tasercake-cms` VM.
-- [ ] Prove `libultrahdr` can detect/decode selected sample if Ultra HDR JPEG.
-- [ ] Install `libvips` with needed delegates.
-- [ ] Test `govips` resize preserving high-bit-depth/color data.
-- [ ] Decide between `govips` and direct C wrapper for resize layer.
-- [ ] Document native dependency versions.
+- [ ] Add `CreateThumbWithOptions` or equivalent thumbnail options path.
+- [ ] Pass effective file-field HDR policy from `apis/file.go` to filesystem thumbnail generation.
+- [ ] Implement typed HDR-required errors.
+- [ ] Change API behavior so HDR-required failures return non-2xx without fallback/original serving.
+- [ ] Add HDR-aware cache namespace/path selection.
+- [ ] Update file delete/replace cleanup for HDR cache namespaces.
+- [ ] Add MIME eligibility/inline serving support for supported HDR formats.
+- [ ] Add tests for routing, failures, cache behavior, original preservation, view behavior, and cleanup.
 
-## Fork Architecture
+## Milestone 4: Native HDR Backend and Deterministic Build
 
-- [ ] Create package `tools/hdrthumb`.
-- [ ] Add `tools/hdrthumb/detect.go`.
-- [ ] Add `tools/hdrthumb/geometry.go`.
-- [ ] Add disabled default backend for builds without `hdr_thumbs` tag.
-- [ ] Add cgo backend behind `hdr_thumbs` build tag.
-- [ ] Add Ultra HDR wrapper files.
-- [ ] Keep non-HDR path unchanged.
+- [ ] Add deterministic native dependency scripts under `scripts/hdrthumb/`.
+- [ ] Add build-tagged HDR backend stubs and disabled-backend behavior.
+- [ ] Build or wrap `libultrahdr` programmatically.
+- [ ] Implement first working HDR thumbnail generation path for detected fixture format.
+- [ ] Add HDR backend tests proving generated thumbnail remains HDR-capable.
 
-## PocketBase Integration
+## Milestone 5: Documentation and Deployment
 
-- [ ] Modify `tools/filesystem/filesystem.go:System.CreateThumb` to route HDR inputs.
-- [ ] Add policy flag/env var: `PB_HDR_THUMBS=require`.
-- [ ] Make HDR source + required policy fail if HDR backend unavailable.
-- [ ] Preserve existing thumbnail cache naming.
-- [ ] Preserve existing `?thumb=` API shape.
-- [ ] Add content-type support for future HDR formats after backend works.
+- [ ] Add `docs/hdr-thumbnails/overview.md`.
+- [ ] Add `docs/hdr-thumbnails/build.md`.
+- [ ] Add `docs/hdr-thumbnails/testing.md`.
+- [ ] Add `docs/hdr-thumbnails/operations.md`.
+- [ ] Verify default build/tests still pass.
+- [ ] Verify HDR build/tests pass.
+- [ ] Deploy HDR-enabled binary to `tasercake-cms`.
+- [ ] Enable `photos.image` HDR policy = require.
+- [ ] Verify live `?thumb=1200x0` URL returns HDR-capable thumbnail from R2-backed storage.
 
-## Ultra HDR JPEG Backend
+## Milestone 6: PR and Review
 
-- [ ] Detect Ultra HDR JPEG reliably.
-- [ ] Decode base image.
-- [ ] Decode/extract gain map.
-- [ ] Compute PocketBase thumbnail geometry.
-- [ ] Resize base image.
-- [ ] Resize gain map with same transform.
-- [ ] Re-encode valid Ultra HDR JPEG.
-- [ ] Verify output with `libultrahdr` decoder.
-- [ ] Verify output metadata with `exiftool`/marker scanner.
-
-## Apple/Adobe Gain Map Backend
-
-- [ ] Identify exact metadata in Krishna's originals.
-- [ ] Parse gain-map metadata.
-- [ ] Extract gain-map image payload.
-- [ ] Resize base and gain map together.
-- [ ] Rebuild metadata with correct dimensions.
-- [ ] Verify output on supported HDR client.
-
-## Tests
-
-- [ ] Add HDR sample fixtures under `tests/data/hdr/`.
-- [ ] Add unit tests for geometry parser.
-- [ ] Add unit tests for HDR detection.
-- [ ] Add integration test for `System.CreateThumb` HDR path.
-- [ ] Add API test for `GET /api/files/...?...thumb=...` returning HDR derivative.
-- [ ] Add failure test: HDR source + required policy + missing backend.
-- [ ] Run `go test ./...`.
-
-## Admin UI / Config
-
-- [ ] Decide first config surface: env var or file-field settings.
-- [ ] If field settings: extend file field schema.
-- [ ] If field settings: update Admin UI under `ui/`.
-- [ ] If field settings: add migration/backward compatibility.
-
-## Build and Deployment
-
-- [ ] Create build docs for HDR-enabled fork.
-- [ ] Build on `tasercake-cms` VM with `CGO_ENABLED=1 -tags hdr_thumbs`.
-- [ ] Stop current PocketBase service.
-- [ ] Backup `/var/lib/pocketbase/pb_data`.
-- [ ] Replace binary with fork binary.
-- [ ] Start service.
-- [ ] Smoke test API/admin.
-- [ ] Generate one HDR thumbnail through PocketBase.
-- [ ] Generate all gallery HDR thumbnails.
-
-## Verification
-
-- [ ] Confirm generated thumbnails are present in R2.
-- [ ] Confirm `?thumb=1200x0` returns HDR-capable derivative.
-- [ ] Confirm original files unchanged.
-- [ ] Confirm Astro/gallery can use normal PocketBase thumb URLs.
-- [ ] Document final working pipeline.
+- [ ] Push final implementation branch.
+- [ ] Open GitHub PR.
+- [ ] Run one reviewer subagent to leave comments directly on the PR.
+- [ ] Address required PR review feedback.
