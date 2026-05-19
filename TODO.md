@@ -9,12 +9,12 @@
 
 ## Milestone 1: Fixtures and Detection
 
-- [ ] Select 2–3 HDR fixture images from current `tasercake-cms` `photos` collection.
-- [ ] Add fixture image files under `tests/data/hdr/`.
-- [ ] Add metadata snapshots under `tests/data/hdr/`.
-- [ ] Add `docs/hdr-thumbnails/fixture-analysis.md`.
-- [ ] Add pure-Go HDR detection package skeleton under `tools/hdrthumb/`.
-- [ ] Add pure-Go detector tests for fixture images.
+- [x] Select 2–3 HDR fixture images from current `tasercake-cms` `photos` collection.
+- [x] Add fixture image files under `tests/data/hdr/`.
+- [x] Add metadata snapshots under `tests/data/hdr/`.
+- [x] Add `docs/hdr-thumbnails/fixture-analysis.md`.
+- [x] Add pure-Go HDR detection package skeleton under `tools/hdrthumb/`.
+- [x] Add pure-Go detector tests for fixture images.
 
 ## Milestone 2: File Field Policy and Admin UI
 
