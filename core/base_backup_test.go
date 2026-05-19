@@ -132,6 +132,7 @@ func verifyBackupContent(app core.App, path string) error {
 		"auxiliary.db-shm",
 		"auxiliary.db-wal",
 		".gitignore",
+		"hdr",
 	}
 
 	entries, err := os.ReadDir(dir)

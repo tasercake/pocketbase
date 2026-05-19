@@ -1223,6 +1223,48 @@ func TestFileFieldInterceptTx(t *testing.T) {
 	checkRecordFiles(t, testApp, record, []string{f3.Name, f4.Name})
 }
 
+func TestFileFieldDeleteCleansHDRThumbNamespace(t *testing.T) {
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	record, err := app.FindRecordById("demo1", "al1h9ijdeojtsjy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filename := record.GetString("file_one")
+	if filename == "" {
+		t.Fatal("Expected demo record file_one fixture")
+	}
+
+	fsys, err := app.NewFilesystem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+
+	basePath := record.BaseFilesPath()
+	thumbPaths := []string{
+		basePath + "/thumbs_" + filename + "/100x100_" + filename,
+		basePath + "/thumbs_hdr_" + filename + "/100x100_" + filename,
+	}
+	for _, p := range thumbPaths {
+		if err := fsys.Upload([]byte("thumb"), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	record.Set("file_one", "")
+	if err := app.Save(record); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range thumbPaths {
+		if exists, _ := fsys.Exists(p); exists {
+			t.Fatalf("Expected thumb namespace artifact to be deleted: %s", p)
+		}
+	}
+}
+
 // -------------------------------------------------------------------
 
 func checkRecordFiles(t *testing.T, testApp core.App, record *core.Record, expectedKeys []string) {

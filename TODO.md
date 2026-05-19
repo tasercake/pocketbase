@@ -26,14 +26,14 @@
 
 ## Milestone 3: Thumbnail Routing, Errors, Cache, and Storage
 
-- [ ] Add `CreateThumbWithOptions` or equivalent thumbnail options path.
-- [ ] Pass effective file-field HDR policy from `apis/file.go` to filesystem thumbnail generation.
-- [ ] Implement typed HDR-required errors.
-- [ ] Change API behavior so HDR-required failures return non-2xx without fallback/original serving.
-- [ ] Add HDR-aware cache namespace/path selection.
-- [ ] Update file delete/replace cleanup for HDR cache namespaces.
-- [ ] Add MIME eligibility/inline serving support for supported HDR formats.
-- [ ] Add tests for routing, failures, cache behavior, original preservation, view behavior, and cleanup.
+- [x] Add `CreateThumbWithOptions` or equivalent thumbnail options path.
+- [x] Pass effective file-field HDR policy from `apis/file.go` to filesystem thumbnail generation.
+- [x] Implement typed HDR-required errors.
+- [x] Change API behavior so HDR-required failures return non-2xx without fallback/original serving.
+- [x] Add HDR-aware cache namespace/path selection.
+- [x] Update file delete/replace cleanup for HDR cache namespaces.
+- [x] Add MIME eligibility/inline serving support for supported HDR formats.
+- [x] Add tests for routing, failures, cache behavior, original preservation, view behavior, and cleanup.
 
 ## Milestone 4: Native HDR Backend and Deterministic Build
 

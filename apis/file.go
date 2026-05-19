@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
+	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 	"github.com/pocketbase/pocketbase/tools/list"
 	"github.com/pocketbase/pocketbase/tools/router"
 	"github.com/spf13/cast"
@@ -19,7 +21,7 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-var imageContentTypes = []string{"image/png", "image/jpg", "image/jpeg", "image/gif", "image/webp"}
+var imageContentTypes = []string{"image/png", "image/jpg", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence", "image/avif", "image/jxl"}
 var defaultThumbSizes = []string{"100x100"}
 
 // bindFileApi registers the file api endpoints and the corresponding handlers.
@@ -135,6 +137,7 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 	}
 
 	baseFilesPath := record.BaseFilesPath()
+	effectiveFileField := fileField
 
 	// fetch the original view file field related record
 	if collection.IsView() {
@@ -143,6 +146,9 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 			return e.NotFoundError("", fmt.Errorf("failed to fetch view file field record: %w", err))
 		}
 		baseFilesPath = fileRecord.BaseFilesPath()
+		if sourceFileField := fileRecord.FindFileFieldByFile(filename); sourceFileField != nil {
+			effectiveFileField = sourceFileField
+		}
 	}
 
 	fsys, err := e.App.NewFilesystem()
@@ -163,7 +169,7 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 
 	// check for valid thumb size param
 	thumbSize := e.Request.URL.Query().Get("thumb")
-	if thumbSize != "" && (list.ExistInSlice(thumbSize, defaultThumbSizes) || list.ExistInSlice(thumbSize, fileField.Thumbs)) {
+	if thumbSize != "" && (list.ExistInSlice(thumbSize, defaultThumbSizes) || list.ExistInSlice(thumbSize, effectiveFileField.Thumbs)) {
 		// extract the original file meta attributes and check it existence
 		oAttrs, oAttrsErr := fsys.Attributes(originalPath)
 		if oAttrsErr != nil {
@@ -172,22 +178,46 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 
 		// check if it is an image
 		if list.ExistInSlice(oAttrs.ContentType, imageContentTypes) {
+			hdrRequired := effectiveFileField.HdrThumbs && effectiveFileField.HdrThumbsPolicy == core.FileFieldHdrThumbsPolicyRequire
+			isHDRSource := false
+			if hdrRequired {
+				var detectErr error
+				isHDRSource, detectErr = api.isHDRSource(fsys, originalPath, oAttrs.ContentType)
+				if detectErr != nil {
+					return e.BadRequestError("Failed to inspect HDR source image.", detectErr)
+				}
+			}
+
 			// add thumb size as file suffix
 			event.ServedName = thumbSize + "_" + filename
-			event.ServedPath = baseFilesPath + "/thumbs_" + filename + "/" + event.ServedName
+			thumbDirName := "thumbs_" + filename
+			if hdrRequired && isHDRSource {
+				thumbDirName = "thumbs_hdr_" + filename
+			}
+			event.ServedPath = baseFilesPath + "/" + thumbDirName + "/" + event.ServedName
 
 			// create a new thumb if it doesn't exist
 			if exists, _ := fsys.Exists(event.ServedPath); !exists {
-				if err := api.createThumb(e, fsys, originalPath, event.ServedPath, thumbSize); err != nil {
+				thumbErr := api.createThumb(e, fsys, originalPath, event.ServedPath, filesystem.ThumbOptions{
+					Size:              thumbSize,
+					HdrEnabled:        effectiveFileField.HdrThumbs,
+					HdrPolicy:         effectiveFileField.HdrThumbsPolicy,
+					SourceContentType: oAttrs.ContentType,
+				})
+				if thumbErr != nil {
+					if hdrRequired && isHDRSource && isHDRThumbError(thumbErr) {
+						return e.BadRequestError("HDR thumbnail generation required but unavailable.", thumbErr)
+					}
+
 					e.App.Logger().Warn(
 						"Fallback to original - failed to create thumb "+event.ServedName,
-						slog.Any("error", err),
+						slog.Any("error", thumbErr),
 						slog.String("original", originalPath),
 						slog.String("thumb", event.ServedPath),
 					)
 
 					// fallback to the original
-					event.ThumbError = err
+					event.ThumbError = thumbErr
 					event.ServedName = filename
 					event.ServedPath = originalPath
 				}
@@ -221,7 +251,7 @@ func (api *fileApi) createThumb(
 	fsys *filesystem.System,
 	originalPath string,
 	thumbPath string,
-	thumbSize string,
+	opts filesystem.ThumbOptions,
 ) error {
 	ch := api.thumbGenPending.DoChan(thumbPath, func() (any, error) {
 		ctx, cancel := context.WithTimeout(e.Request.Context(), api.thumbGenMaxWait)
@@ -232,7 +262,8 @@ func (api *fileApi) createThumb(
 		}
 		defer api.thumbGenSem.Release(1)
 
-		return nil, fsys.CreateThumb(originalPath, thumbPath, thumbSize)
+		_, err := fsys.CreateThumbWithOptions(originalPath, thumbPath, opts)
+		return nil, err
 	})
 
 	res := <-ch
@@ -240,4 +271,29 @@ func (api *fileApi) createThumb(
 	api.thumbGenPending.Forget(thumbPath)
 
 	return res.Err
+}
+
+func (api *fileApi) isHDRSource(fsys *filesystem.System, originalPath string, contentType string) (bool, error) {
+	r, err := fsys.GetReader(originalPath)
+	if err != nil {
+		return false, err
+	}
+	defer r.Close()
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return false, err
+	}
+
+	detected, err := hdrthumb.DetectBytes(data, contentType)
+	if err != nil {
+		return false, err
+	}
+
+	return detected.Kind != hdrthumb.KindNone, nil
+}
+
+func isHDRThumbError(err error) bool {
+	var hdrErr *hdrthumb.Error
+	return errors.As(err, &hdrErr) || errors.Is(err, hdrthumb.ErrHDRBackendUnavailable) || errors.Is(err, hdrthumb.ErrUnsupportedHDRKind) || errors.Is(err, hdrthumb.ErrHDRGenerationFailed) || errors.Is(err, hdrthumb.ErrHDRRequired)
 }

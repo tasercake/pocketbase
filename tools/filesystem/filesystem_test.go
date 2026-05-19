@@ -17,6 +17,7 @@ import (
 
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
+	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 )
 
 func TestFileSystemExists(t *testing.T) {
@@ -953,6 +954,52 @@ func TestFileSystemCreateThumb(t *testing.T) {
 				t.Fatalf("Expected thumb attrs %s MimeType %q, got %q", s.thumb, s.expectedMimeType, attrsMimeType)
 			}
 		})
+	}
+}
+
+func TestFileSystemCreateThumbWithOptionsHDRRequireUnavailable(t *testing.T) {
+	dir := createTestDir(t)
+	defer os.RemoveAll(dir)
+
+	fsys, err := filesystem.NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+
+	original := []byte("avif hdr source bytes")
+	if err := fsys.Upload(original, "hdr.avif"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = fsys.CreateThumbWithOptions("hdr.avif", "thumbs_hdr_hdr.avif/100x100_hdr.avif", filesystem.ThumbOptions{
+		Size:              "100x100",
+		HdrEnabled:        true,
+		HdrPolicy:         "require",
+		SourceContentType: "image/avif",
+	})
+	if err == nil {
+		t.Fatal("Expected HDR required error, got nil")
+	}
+	if !errors.Is(err, hdrthumb.ErrHDRRequired) || !errors.Is(err, hdrthumb.ErrHDRBackendUnavailable) {
+		t.Fatalf("Expected HDR required/backend unavailable error, got %v", err)
+	}
+
+	if exists, _ := fsys.Exists("thumbs_hdr_hdr.avif/100x100_hdr.avif"); exists {
+		t.Fatal("HDR thumb should not be written when backend is unavailable")
+	}
+
+	r, err := fsys.GetReader("hdr.avif")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	stored, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, original) {
+		t.Fatal("Original HDR source was modified")
 	}
 }
 

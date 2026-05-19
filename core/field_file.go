@@ -660,9 +660,11 @@ func (f *FileField) deleteFilesByNamesList(ctx context.Context, app App, record 
 			filenames = append(filenames[:i], filenames[i+1:]...)
 
 			// try to delete the related file thumbs (if any)
-			thumbsErr := fsys.DeletePrefix(record.BaseFilesPath() + "/thumbs_" + filename + "/")
-			if len(thumbsErr) > 0 {
-				app.Logger().Warn("Failed to delete file thumbs", "error", errors.Join(thumbsErr...))
+			for _, prefix := range []string{"thumbs_", "thumbs_hdr_"} {
+				thumbsErr := fsys.DeletePrefix(record.BaseFilesPath() + "/" + prefix + filename + "/")
+				if len(thumbsErr) > 0 {
+					app.Logger().Warn("Failed to delete file thumbs", "error", errors.Join(thumbsErr...))
+				}
 			}
 		}
 	}
