@@ -45,15 +45,15 @@
 
 ## Milestone 5: Documentation and Deployment
 
-- [ ] Add `docs/hdr-thumbnails/overview.md`.
-- [ ] Add `docs/hdr-thumbnails/build.md`.
-- [ ] Add `docs/hdr-thumbnails/testing.md`.
-- [ ] Add `docs/hdr-thumbnails/operations.md`.
-- [ ] Verify default build/tests still pass.
-- [ ] Verify HDR build/tests pass.
-- [ ] Deploy HDR-enabled binary to `tasercake-cms`.
-- [ ] Enable `photos.image` HDR policy = require.
-- [ ] Verify live `?thumb=1200x0` URL returns HDR-capable thumbnail from R2-backed storage.
+- [x] Add `docs/hdr-thumbnails/overview.md`.
+- [x] Add `docs/hdr-thumbnails/build.md`.
+- [x] Add `docs/hdr-thumbnails/testing.md`.
+- [x] Add `docs/hdr-thumbnails/operations.md`.
+- [x] Verify default build/tests still pass.
+- [x] Verify HDR build/tests pass.
+- [x] Deploy HDR-enabled binary to `tasercake-cms`.
+- [x] Enable `photos.image` HDR policy = require.
+- [x] Verify live `?thumb=1200x0` URL returns HDR-capable thumbnail from R2-backed storage.
 
 ## Milestone 6: PR and Review
 
