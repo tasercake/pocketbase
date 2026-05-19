@@ -16,12 +16,13 @@ For HDR originals, that thumbnail response must itself remain HDR-capable.
 
 - Detect when an uploaded image contains HDR data.
 - Generate resized thumbnails that preserve/regenerate HDR representation.
-- Support gain-map based HDR images, starting with the format used by the current photo archive.
+- Support gain-map based HDR images – need full support for the most common formats.
 - Keep PocketBase's existing thumbnail URL/API shape.
 - Store generated thumbnails in PocketBase's existing file storage backend, including R2/S3.
 - Keep original uploaded files byte-preserved.
 - Fail clearly when HDR thumbnail generation is required but unsupported for a given image.
 - Allow non-HDR images to continue using normal thumbnail generation.
+- Admin UI controls for HDR thumbnail policy on `file` fields.
 
 ## Required User Experience
 
@@ -34,37 +35,25 @@ For HDR originals, that thumbnail response must itself remain HDR-capable.
 
 ## Supported Environment
 
-Initial target deployment:
-
 - Self-hosted PocketBase fork
 - Linux VM
 - SQLite database
 - R2/S3 file storage
 - Photo collection with image file field
 
-Native image-processing dependencies are acceptable if needed.
+Native image-processing dependencies are acceptable if needed, but must be installed at/before build time programmatically and deterministically – no manual intervention should be needed.
 
-## Initial Success Criteria
+## Success Criteria
 
 - One known HDR source photo produces a resized HDR thumbnail through PocketBase.
 - Generated thumbnail is verified as HDR-capable by metadata/format inspection.
 - Thumbnail is served from the existing PocketBase `?thumb=` endpoint.
 - Generated thumbnail is stored in R2 through PocketBase storage.
 - Existing non-HDR thumbnail behavior remains functional.
+- Automated tests with fixture images (get 2-3 from current photo collection).
+- Document build/deployment requirements for HDR-enabled PocketBase.
 
-## Out of Scope Initially
+## Out of Scope
 
-- Full rewrite of PocketBase media system.
-- Replacing PocketBase admin UI.
 - Separate CMS/gallery product.
 - Manual pre-generated thumbnail upload workflow.
-- Support for every HDR image format on day one.
-
-## Expansion Goals
-
-After the first working HDR format:
-
-- Broaden detection/support to Apple, Adobe, Ultra HDR, HEIC/AVIF/JPEG XL as needed.
-- Add admin UI controls for HDR thumbnail policy.
-- Add automated tests with fixture images.
-- Document build/deployment requirements for HDR-enabled PocketBase.
