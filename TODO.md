@@ -57,7 +57,7 @@
 
 ## Milestone 6: PR and Review
 
-- [ ] Push final implementation branch.
-- [ ] Open GitHub PR.
+- [x] Push final implementation branch.
+- [x] Open GitHub PR.
 - [ ] Run one reviewer subagent to leave comments directly on the PR.
 - [ ] Address required PR review feedback.
