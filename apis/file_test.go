@@ -1,6 +1,8 @@
 package apis_test
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
+	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 	"github.com/pocketbase/pocketbase/tools/types"
 )
 
@@ -534,6 +537,192 @@ func TestFileDownload(t *testing.T) {
 		// regular request test
 		scenario.Test(t)
 	}
+}
+
+func TestFileDownloadHDRRequiredNoFallbackOrHook(t *testing.T) {
+	if hdrthumb.Available() {
+		t.Skip("HDR backend is available in this build")
+	}
+	app, record, filename := setupHDRRequiredFileDownload(t)
+	defer app.Cleanup()
+
+	fsys, err := app.NewFilesystem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+
+	staleSDRPath := record.BaseFilesPath() + "/thumbs_" + filename + "/33x33_" + filename
+	if err := fsys.Upload([]byte("STALE_SDR_THUMB"), staleSDRPath); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksCalled := 0
+	app.OnFileDownloadRequest().BindFunc(func(e *core.FileDownloadRequestEvent) error {
+		hooksCalled++
+		return e.String(http.StatusTeapot, "hook served")
+	})
+
+	res := performFileRequest(t, app, "/api/files/demo1/"+record.Id+"/"+filename+"?thumb=33x33")
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+
+	if res.StatusCode < 400 || res.StatusCode >= 500 {
+		t.Fatalf("Expected non-2xx client error, got %d: %s", res.StatusCode, body)
+	}
+	if hooksCalled != 0 {
+		t.Fatalf("Expected file download hook not to run, got %d calls", hooksCalled)
+	}
+	if bytes.Contains(body, []byte("STALE_SDR_THUMB")) || bytes.Contains(body, []byte("hook served")) {
+		t.Fatalf("Expected no stale thumb/original/hook fallback, got body %q", string(body))
+	}
+	if exists, _ := fsys.Exists(record.BaseFilesPath() + "/thumbs_hdr_" + filename + "/33x33_" + filename); exists {
+		t.Fatal("HDR thumb should not be written when the required HDR backend is unavailable")
+	}
+}
+
+func TestFileDownloadHDRRequiredViewUsesSourceField(t *testing.T) {
+	if hdrthumb.Available() {
+		t.Skip("HDR backend is available in this build")
+	}
+	app, record, filename := setupHDRRequiredFileDownload(t)
+	defer app.Cleanup()
+
+	view := new(core.Collection)
+	view.Type = core.CollectionTypeView
+	view.Name = "_hdr_api_view"
+	view.ViewQuery = "select id, file_one from demo1"
+	if err := app.Save(view); err != nil {
+		t.Fatal(err)
+	}
+
+	res := performFileRequest(t, app, "/api/files/"+view.Name+"/"+record.Id+"/"+filename+"?thumb=33x33")
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+
+	if res.StatusCode < 400 || res.StatusCode >= 500 {
+		t.Fatalf("Expected view download to enforce base file field HDR policy, got %d: %s", res.StatusCode, body)
+	}
+}
+
+func TestFileDownloadHDRRequiredPreservesNonHDRBehavior(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+
+	demo1, err := app.FindCollectionByNameOrId("demo1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileField := demo1.Fields.GetByName("file_one").(*core.FileField)
+	fileField.Protected = false
+	fileField.Thumbs = []string{"33x33"}
+	fileField.HdrThumbs = true
+	fileField.HdrThumbsPolicy = core.FileFieldHdrThumbsPolicyRequire
+	if err := app.Save(demo1); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := app.FindRecordById("demo1", "al1h9ijdeojtsjy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filename := record.GetString("file_one")
+	res := performFileRequest(t, app, "/api/files/demo1/"+record.Id+"/"+filename+"?thumb=33x33")
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected non-HDR source to keep existing thumbnail behavior, got %d: %s", res.StatusCode, body)
+	}
+
+	fsys, err := app.NewFilesystem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+	if exists, _ := fsys.Exists(record.BaseFilesPath() + "/thumbs_" + filename + "/33x33_" + filename); !exists {
+		t.Fatal("Expected non-HDR source to use the regular thumbs_ namespace")
+	}
+	if exists, _ := fsys.Exists(record.BaseFilesPath() + "/thumbs_hdr_" + filename + "/33x33_" + filename); exists {
+		t.Fatal("Did not expect non-HDR source to use the HDR thumbs namespace")
+	}
+}
+
+func setupHDRRequiredFileDownload(t *testing.T) (*tests.TestApp, *core.Record, string) {
+	t.Helper()
+
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	demo1, err := app.FindCollectionByNameOrId("demo1")
+	if err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	fileField := demo1.Fields.GetByName("file_one").(*core.FileField)
+	fileField.Protected = false
+	fileField.Thumbs = []string{"33x33"}
+	fileField.HdrThumbs = true
+	fileField.HdrThumbsPolicy = core.FileFieldHdrThumbsPolicyRequire
+	if err := app.Save(demo1); err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+
+	record, err := app.FindRecordById("demo1", "al1h9ijdeojtsjy")
+	if err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	filename := "current_photo_hdr.jpg"
+
+	_, currentFile, _, _ := runtime.Caller(0)
+	hdrBytes, err := os.ReadFile(filepath.Join(path.Dir(currentFile), "../tests/data/hdr/current-photo-1.jpg"))
+	if err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	fsys, err := app.NewFilesystem()
+	if err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+	if err := fsys.Upload(hdrBytes, record.BaseFilesPath()+"/"+filename); err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	if _, err := app.DB().NewQuery("UPDATE demo1 SET file_one={:filename} WHERE id={:id}").Bind(map[string]any{
+		"filename": filename,
+		"id":       record.Id,
+	}).Execute(); err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	record.SetRaw("file_one", filename)
+
+	return app, record, filename
+}
+
+func performFileRequest(t *testing.T, app core.App, url string) *http.Response {
+	t.Helper()
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	pbRouter, err := apis.NewRouter(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux, err := pbRouter.BuildMux()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux.ServeHTTP(recorder, req)
+	return recorder.Result()
 }
 
 func TestConcurrentThumbsGeneration(t *testing.T) {

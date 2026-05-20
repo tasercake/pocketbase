@@ -22,6 +22,7 @@ import (
 	"github.com/pocketbase/pocketbase/tools/filesystem/internal/fileblob"
 	"github.com/pocketbase/pocketbase/tools/filesystem/internal/s3blob"
 	"github.com/pocketbase/pocketbase/tools/filesystem/internal/s3blob/s3"
+	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 	"github.com/pocketbase/pocketbase/tools/list"
 
 	// explicit webp decoder because disintegration/imaging does not support webp
@@ -400,6 +401,7 @@ func (s *System) IsEmptyDir(dir string) bool {
 var inlineServeContentTypes = []string{
 	// image
 	"image/png", "image/jpg", "image/jpeg", "image/gif", "image/webp", "image/x-icon", "image/bmp",
+	"image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence", "image/avif", "image/jxl",
 	// video
 	"video/webm", "video/mp4", "video/3gpp", "video/quicktime", "video/x-ms-wmv",
 	// audio
@@ -497,9 +499,25 @@ var ThumbSizeRegex = regexp.MustCompile(`^(\d+)x(\d+)(t|b|f)?$`)
 // - WxHb (eg. 300x100b) - resize and crop to WxH viewbox (from bottom)
 // - WxHf (eg. 300x100f) - fit inside a WxH viewbox (without cropping)
 func (s *System) CreateThumb(originalKey string, thumbKey, thumbSize string) error {
+	_, err := s.CreateThumbWithOptions(originalKey, thumbKey, ThumbOptions{Size: thumbSize})
+	return err
+}
+
+// ThumbOptions configures thumbnail generation.
+type ThumbOptions struct {
+	Size              string
+	HdrEnabled        bool
+	HdrPolicy         string
+	SourceContentType string
+}
+
+// CreateThumbWithOptions creates a new thumb image for the file at originalKey location.
+// The new thumb file is stored at thumbKey location.
+func (s *System) CreateThumbWithOptions(originalKey string, thumbKey string, opts ThumbOptions) (*blob.Attributes, error) {
+	thumbSize := opts.Size
 	sizeParts := ThumbSizeRegex.FindStringSubmatch(thumbSize)
 	if len(sizeParts) != 4 {
-		return errors.New("thumb size must be in WxH, WxHt, WxHb or WxHf format")
+		return nil, errors.New("thumb size must be in WxH, WxHt, WxHb or WxHf format")
 	}
 
 	width, _ := strconv.Atoi(sizeParts[1])
@@ -507,21 +525,75 @@ func (s *System) CreateThumb(originalKey string, thumbKey, thumbSize string) err
 	resizeType := sizeParts[3]
 
 	if width == 0 && height == 0 {
-		return errors.New("thumb width and height cannot be zero at the same time")
+		return nil, errors.New("thumb width and height cannot be zero at the same time")
 	}
 
 	// fetch the original
 	r, readErr := s.GetReader(originalKey)
 	if readErr != nil {
-		return readErr
+		return nil, readErr
 	}
 	defer r.Close()
+
+	originalContentType := opts.SourceContentType
+	if originalContentType == "" {
+		originalContentType = r.ContentType()
+	}
+
+	if opts.HdrEnabled && opts.HdrPolicy == "require" {
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, err
+		}
+
+		detected, err := hdrthumb.DetectBytes(data, originalContentType)
+		if err != nil {
+			return nil, err
+		}
+
+		if detected.Kind != hdrthumb.KindNone {
+			result, err := hdrthumb.Create(data, hdrthumb.Options{
+				Size:                thumbSize,
+				OriginalName:        path.Base(originalKey),
+				ThumbName:           path.Base(thumbKey),
+				OriginalContentType: originalContentType,
+			})
+			if err != nil {
+				return nil, hdrthumb.NewError(errors.Join(hdrthumb.ErrHDRRequired, err), detected.Kind, path.Base(originalKey), thumbSize, err.Error())
+			}
+
+			contentType := result.ContentType
+			if contentType == "" {
+				contentType = originalContentType
+			}
+
+			w, err := s.bucket.NewWriter(s.ctx, thumbKey, &blob.WriterOptions{ContentType: contentType})
+			if err != nil {
+				return nil, err
+			}
+			if _, err := w.Write(result.Bytes); err != nil {
+				return nil, errors.Join(err, w.Close())
+			}
+			if err := w.Close(); err != nil {
+				return nil, err
+			}
+			return s.Attributes(thumbKey)
+		}
+
+		// reopen for SDR generation after detection consumed the reader.
+		r.Close()
+		r, readErr = s.GetReader(originalKey)
+		if readErr != nil {
+			return nil, readErr
+		}
+		defer r.Close()
+	}
 
 	// create imaging object from the original reader
 	// (note: only the first frame for animated image formats)
 	img, decodeErr := imaging.Decode(r, imaging.AutoOrientation(true))
 	if decodeErr != nil {
-		return decodeErr
+		return nil, decodeErr
 	}
 
 	var thumbImg *image.NRGBA
@@ -546,9 +618,7 @@ func (s *System) CreateThumb(originalKey string, thumbKey, thumbSize string) err
 		}
 	}
 
-	originalContentType := r.ContentType()
-
-	opts := &blob.WriterOptions{
+	writerOpts := &blob.WriterOptions{
 		ContentType: originalContentType,
 	}
 
@@ -565,23 +635,27 @@ func (s *System) CreateThumb(originalKey string, thumbKey, thumbSize string) err
 		format = imaging.BMP
 	default:
 		// fallback to PNG (this includes webp!)
-		opts.ContentType = "image/png"
+		writerOpts.ContentType = "image/png"
 		format = imaging.PNG
 	}
 
 	// open a thumb storage writer (aka. prepare for upload)
-	w, err := s.bucket.NewWriter(s.ctx, thumbKey, opts)
+	w, err := s.bucket.NewWriter(s.ctx, thumbKey, writerOpts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// thumb encode (aka. upload)
 	err = imaging.Encode(w, thumbImg, format)
 	if err != nil {
 		w.Close()
-		return err
+		return nil, err
 	}
 
 	// check for close errors to ensure that the thumb was really saved
-	return w.Close()
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+
+	return s.Attributes(thumbKey)
 }

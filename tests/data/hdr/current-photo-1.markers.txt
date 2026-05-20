@@ -1,0 +1,13 @@
+0x00000000 0xFFD8 SOI   len=0     
+0x00000002 0xFFE1 APP1  len=19131 Exif
+0x00004abf 0xFFED APP13 len=19054 Photoshop 3.0
+0x0000952f 0xFFE2 APP2  len=3160  ICC_PROFILE
+0x0000a189 0xFFE1 APP1  len=944   http://ns.adobe.com/xap/1.0/
+0x0000a53b 0xFFE2 APP2  len=88    MPF
+0x0000a595 0xFFE2 APP2  len=34    urn:iso:std:iso:ts:21496:-1
+0x0000a5b9 0xFFDB DQT   len=132   -
+0x0000a63f 0xFFDD DRI   len=4     k
+0x0000a645 0xFFEE APP14 len=14    Adobe
+0x0000a655 0xFFC0 SOF0  len=17    Q
+0x0000a668 0xFFC4 DHT   len=205   -
+0x0000a737 0xFFDA SOS   len=0     
