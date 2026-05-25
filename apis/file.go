@@ -1,24 +1,16 @@
 package apis
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"runtime"
-	"time"
 
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
 	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 	"github.com/pocketbase/pocketbase/tools/list"
 	"github.com/pocketbase/pocketbase/tools/router"
-	"github.com/spf13/cast"
-	"golang.org/x/sync/semaphore"
-	"golang.org/x/sync/singleflight"
 )
 
 var imageContentTypes = []string{"image/png", "image/jpg", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence", "image/avif", "image/jxl"}
@@ -26,21 +18,7 @@ var defaultThumbSizes = []string{"100x100"}
 
 // bindFileApi registers the file api endpoints and the corresponding handlers.
 func bindFileApi(app core.App, rg *router.RouterGroup[*core.RequestEvent]) {
-	maxWorkers := cast.ToInt64(os.Getenv("PB_THUMBS_MAX_WORKERS"))
-	if maxWorkers <= 0 {
-		maxWorkers = int64(runtime.NumCPU() + 2) // the value is arbitrary chosen and may change in the future
-	}
-
-	maxWait := cast.ToInt64(os.Getenv("PB_THUMBS_MAX_WAIT"))
-	if maxWait <= 0 {
-		maxWait = 60
-	}
-
-	api := fileApi{
-		thumbGenPending: new(singleflight.Group),
-		thumbGenSem:     semaphore.NewWeighted(maxWorkers),
-		thumbGenMaxWait: time.Duration(maxWait) * time.Second,
-	}
+	api := fileApi{thumbs: sharedThumbMaterializer}
 
 	sub := rg.Group("/files")
 	sub.POST("/token", api.fileToken).Bind(RequireAuth())
@@ -48,17 +26,7 @@ func bindFileApi(app core.App, rg *router.RouterGroup[*core.RequestEvent]) {
 }
 
 type fileApi struct {
-	// thumbGenSem is a semaphore to prevent too much concurrent
-	// requests generating new thumbs at the same time.
-	thumbGenSem *semaphore.Weighted
-
-	// thumbGenPending represents a group of currently pending
-	// thumb generation processes.
-	thumbGenPending *singleflight.Group
-
-	// thumbGenMaxWait is the maximum waiting time for starting a new
-	// thumb generation process.
-	thumbGenMaxWait time.Duration
+	thumbs *thumbMaterializer
 }
 
 func (api *fileApi) fileToken(e *core.RequestEvent) error {
@@ -182,7 +150,8 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 			isHDRSource := false
 			if hdrRequired {
 				var detectErr error
-				isHDRSource, detectErr = api.isHDRSource(fsys, originalPath, oAttrs.ContentType)
+				detected, detectErr := api.thumbs.detectHDRSource(fsys, originalPath, oAttrs.ContentType)
+				isHDRSource = detected.Kind != hdrthumb.KindNone
 				if detectErr != nil {
 					return e.BadRequestError("Failed to inspect HDR source image.", detectErr)
 				}
@@ -253,47 +222,5 @@ func (api *fileApi) createThumb(
 	thumbPath string,
 	opts filesystem.ThumbOptions,
 ) error {
-	ch := api.thumbGenPending.DoChan(thumbPath, func() (any, error) {
-		ctx, cancel := context.WithTimeout(e.Request.Context(), api.thumbGenMaxWait)
-		defer cancel()
-
-		if err := api.thumbGenSem.Acquire(ctx, 1); err != nil {
-			return nil, err
-		}
-		defer api.thumbGenSem.Release(1)
-
-		_, err := fsys.CreateThumbWithOptions(originalPath, thumbPath, opts)
-		return nil, err
-	})
-
-	res := <-ch
-
-	api.thumbGenPending.Forget(thumbPath)
-
-	return res.Err
-}
-
-func (api *fileApi) isHDRSource(fsys *filesystem.System, originalPath string, contentType string) (bool, error) {
-	r, err := fsys.GetReader(originalPath)
-	if err != nil {
-		return false, err
-	}
-	defer r.Close()
-
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return false, err
-	}
-
-	detected, err := hdrthumb.DetectBytes(data, contentType)
-	if err != nil {
-		return false, err
-	}
-
-	return detected.Kind != hdrthumb.KindNone, nil
-}
-
-func isHDRThumbError(err error) bool {
-	var hdrErr *hdrthumb.Error
-	return errors.As(err, &hdrErr) || errors.Is(err, hdrthumb.ErrHDRBackendUnavailable) || errors.Is(err, hdrthumb.ErrUnsupportedHDRKind) || errors.Is(err, hdrthumb.ErrHDRGenerationFailed) || errors.Is(err, hdrthumb.ErrHDRRequired)
+	return api.thumbs.createThumb(e.Request.Context(), fsys, originalPath, thumbPath, opts)
 }
