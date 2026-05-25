@@ -50,13 +50,12 @@ struct Size {
 };
 
 struct Geometry {
+  int srcLeft = 0;
+  int srcTop = 0;
+  int srcW = 0;
+  int srcH = 0;
   int resizeW = 0;
   int resizeH = 0;
-  int cropLeft = 0;
-  int cropTop = 0;
-  int cropRight = 0;
-  int cropBottom = 0;
-  bool crop = false;
 };
 
 struct RGBImage {
@@ -77,7 +76,7 @@ static void jpegErrorExit(j_common_ptr cinfo) {
   longjmp(e->jump, 1);
 }
 
-static int scaled(int n, double scale) { return std::max(1, static_cast<int>(n * scale + 0.5)); }
+static int rounded(double v) { return std::max(1, static_cast<int>(v + 0.5)); }
 
 static Size parseSize(const std::string& s) {
   Size z;
@@ -98,61 +97,87 @@ static Size parseSize(const std::string& s) {
 static void targetContain(int sw, int sh, const Size& s, int& tw, int& th) {
   if (s.w == 0) {
     th = s.h;
-    tw = static_cast<int>(static_cast<long long>(sw) * th / sh);
+    tw = rounded(static_cast<double>(th) * sw / sh);
   } else if (s.h == 0) {
     tw = s.w;
-    th = static_cast<int>(static_cast<long long>(sh) * tw / sw);
+    th = rounded(static_cast<double>(tw) * sh / sw);
   } else {
     tw = s.w;
     th = s.h;
   }
-  if (tw < 1) tw = 1;
-  if (th < 1) th = 1;
 }
 
 static void targetFit(int sw, int sh, const Size& s, int& tw, int& th) {
   if (s.w == 0 || s.h == 0 || s.mode != 'f') return targetContain(sw, sh, s, tw, th);
-  if (static_cast<long long>(s.w) * sh <= static_cast<long long>(s.h) * sw) {
+  if (sw <= s.w && sh <= s.h) {
+    tw = sw;
+    th = sh;
+    return;
+  }
+  double srcAspect = static_cast<double>(sw) / sh;
+  double maxAspect = static_cast<double>(s.w) / s.h;
+  if (srcAspect > maxAspect) {
     tw = s.w;
-    th = static_cast<int>(static_cast<long long>(sh) * tw / sw);
+    th = std::max(1, static_cast<int>(static_cast<double>(tw) / srcAspect));
   } else {
     th = s.h;
-    tw = static_cast<int>(static_cast<long long>(sw) * th / sh);
+    tw = std::max(1, static_cast<int>(static_cast<double>(th) * srcAspect));
   }
-  if (tw < 1) tw = 1;
-  if (th < 1) th = 1;
+}
+
+static int anchorOffset(int srcN, int cropN, char mode) {
+  if (mode == 't') return 0;
+  if (mode == 'b') return srcN - cropN;
+  return (srcN - cropN) / 2;
 }
 
 static Geometry targetGeometry(int sw, int sh, const Size& s) {
   Geometry g;
+  g.srcW = sw;
+  g.srcH = sh;
+
   if (s.w == 0 || s.h == 0 || s.mode == 'f') {
     targetFit(sw, sh, s, g.resizeW, g.resizeH);
     return g;
   }
 
-  double scale = std::max(static_cast<double>(s.w) / sw, static_cast<double>(s.h) / sh);
-  g.resizeW = scaled(sw, scale);
-  g.resizeH = scaled(sh, scale);
+  g.resizeW = s.w;
+  g.resizeH = s.h;
 
-  int extraX = std::max(0, g.resizeW - s.w);
-  int extraY = std::max(0, g.resizeH - s.h);
-  g.cropLeft = extraX / 2;
-  g.cropTop = extraY / 2;
-  if (s.mode == 't') g.cropTop = 0;
-  if (s.mode == 'b') g.cropTop = extraY;
-  g.cropRight = g.cropLeft + s.w;
-  g.cropBottom = g.cropTop + s.h;
-  g.crop = true;
+  // Match imaging.Fill for normal images: crop source to destination aspect, then resize.
+  if (sw >= 100 && sh >= 100) {
+    double srcAspect = static_cast<double>(sw) / sh;
+    double dstAspect = static_cast<double>(s.w) / s.h;
+    if (srcAspect < dstAspect) {
+      g.srcH = rounded(static_cast<double>(sw) * s.h / s.w);
+      g.srcTop = anchorOffset(sh, g.srcH, s.mode);
+    } else {
+      g.srcW = rounded(static_cast<double>(sh) * s.w / s.h);
+      g.srcLeft = (sw - g.srcW) / 2;
+    }
+    return g;
+  }
+
+  // Small-image fallback mirrors imaging's resize-then-crop dimensions.
+  double scale = std::max(static_cast<double>(s.w) / sw, static_cast<double>(s.h) / sh);
+  int scaledW = rounded(sw * scale);
+  int scaledH = rounded(sh * scale);
+  g.srcLeft = 0;
+  g.srcTop = 0;
+  g.srcW = sw;
+  g.srcH = sh;
+  g.resizeW = std::min(s.w, scaledW);
+  g.resizeH = std::min(s.h, scaledH);
   return g;
 }
 
-static int outW(const Geometry& g) { return g.crop ? g.cropRight - g.cropLeft : g.resizeW; }
-static int outH(const Geometry& g) { return g.crop ? g.cropBottom - g.cropTop : g.resizeH; }
+static int outW(const Geometry& g) { return g.resizeW; }
+static int outH(const Geometry& g) { return g.resizeH; }
 
 static int clampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
-static double sourceCoord(int out, int cropOffset, int srcN, int resizedN) {
-  return (static_cast<double>(cropOffset + out) + 0.5) * srcN / resizedN - 0.5;
+static double sourceCoord(int out, int srcOffset, int srcN, int dstN) {
+  return srcOffset + (static_cast<double>(out) + 0.5) * srcN / dstN - 0.5;
 }
 
 static unsigned char lerp8(unsigned char c00, unsigned char c10, unsigned char c01, unsigned char c11,
@@ -218,12 +243,12 @@ static RGBImage resizeRGB(const RGBImage& src, const Geometry& g) {
   dst.px.resize(static_cast<size_t>(dst.w) * dst.h * 3);
 
   for (int y = 0; y < dst.h; y++) {
-    double srcY = sourceCoord(y, g.crop ? g.cropTop : 0, src.h, g.resizeH);
+    double srcY = sourceCoord(y, g.srcTop, g.srcH, g.resizeH);
     int y0 = clampInt(static_cast<int>(srcY), 0, src.h - 1);
     int y1 = clampInt(y0 + 1, 0, src.h - 1);
     double fy = std::max(0.0, std::min(1.0, srcY - y0));
     for (int x = 0; x < dst.w; x++) {
-      double srcX = sourceCoord(x, g.crop ? g.cropLeft : 0, src.w, g.resizeW);
+      double srcX = sourceCoord(x, g.srcLeft, g.srcW, g.resizeW);
       int x0 = clampInt(static_cast<int>(srcX), 0, src.w - 1);
       int x1 = clampInt(x0 + 1, 0, src.w - 1);
       double fx = std::max(0.0, std::min(1.0, srcX - x0));
@@ -246,12 +271,12 @@ static std::vector<uint32_t> resizePacked32(const uhdr_raw_image_t* src, const G
   unsigned int stride = src->stride[UHDR_PLANE_PACKED] ? src->stride[UHDR_PLANE_PACKED] : src->w;
 
   for (int y = 0; y < dh; y++) {
-    double srcY = sourceCoord(y, g.crop ? g.cropTop : 0, static_cast<int>(src->h), g.resizeH);
+    double srcY = sourceCoord(y, g.srcTop, g.srcH, g.resizeH);
     int y0 = clampInt(static_cast<int>(srcY), 0, static_cast<int>(src->h) - 1);
     int y1 = clampInt(y0 + 1, 0, static_cast<int>(src->h) - 1);
     double fy = std::max(0.0, std::min(1.0, srcY - y0));
     for (int x = 0; x < dw; x++) {
-      double srcX = sourceCoord(x, g.crop ? g.cropLeft : 0, static_cast<int>(src->w), g.resizeW);
+      double srcX = sourceCoord(x, g.srcLeft, g.srcW, g.resizeW);
       int x0 = clampInt(static_cast<int>(srcX), 0, static_cast<int>(src->w) - 1);
       int x1 = clampInt(x0 + 1, 0, static_cast<int>(src->w) - 1);
       double fx = std::max(0.0, std::min(1.0, srcX - x0));
