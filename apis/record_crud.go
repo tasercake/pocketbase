@@ -101,6 +101,10 @@ func recordsList(e *core.RequestEvent) error {
 			return firstApiError(err, e.InternalServerError("Failed to enrich records", err))
 		}
 
+		if err := attachGalleryPhotoURLs(e.RequestEvent, e.Records...); err != nil {
+			return e.Error(http.StatusServiceUnavailable, "Failed to materialize gallery thumbnails.", err)
+		}
+
 		// Add a randomized throttle in case of too many empty search filter attempts.
 		//
 		// This is just for extra precaution since security researches raised concern regarding the possibility of eventual
@@ -198,6 +202,10 @@ func recordView(e *core.RequestEvent) error {
 	return e.App.OnRecordViewRequest().Trigger(event, func(e *core.RecordRequestEvent) error {
 		if err := EnrichRecord(e.RequestEvent, e.Record); err != nil {
 			return firstApiError(err, e.InternalServerError("Failed to enrich record", err))
+		}
+
+		if err := attachGalleryPhotoURLs(e.RequestEvent, e.Record); err != nil {
+			return e.Error(http.StatusServiceUnavailable, "Failed to materialize gallery thumbnails.", err)
 		}
 
 		return execAfterSuccessTx(true, e.App, func() error {
