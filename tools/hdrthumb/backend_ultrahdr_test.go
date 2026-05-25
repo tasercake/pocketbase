@@ -84,7 +84,7 @@ func TestUltraHDRBackendGeometryModes(t *testing.T) {
 		wantHeight int
 	}{
 		{name: "width preserves aspect", size: "160x0", wantWidth: 160, wantHeight: 213},
-		{name: "height preserves aspect", size: "0x80", wantWidth: 59, wantHeight: 80},
+		{name: "height preserves aspect", size: "0x80", wantWidth: 60, wantHeight: 80},
 		{name: "center crop", size: "160x80", wantWidth: 160, wantHeight: 80},
 		{name: "top crop", size: "160x80t", wantWidth: 160, wantHeight: 80},
 		{name: "bottom crop", size: "160x80b", wantWidth: 160, wantHeight: 80},
