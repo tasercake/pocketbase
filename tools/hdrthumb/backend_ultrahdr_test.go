@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"image"
 	"image/jpeg"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/disintegration/imaging"
 )
 
 type helperProbeResult struct {
@@ -85,7 +88,7 @@ func TestUltraHDRBackendGeometryModes(t *testing.T) {
 		{name: "center crop", size: "160x80", wantWidth: 160, wantHeight: 80},
 		{name: "top crop", size: "160x80t", wantWidth: 160, wantHeight: 80},
 		{name: "bottom crop", size: "160x80b", wantWidth: 160, wantHeight: 80},
-		{name: "fit", size: "160x80f", wantWidth: 60, wantHeight: 80},
+		{name: "fit", size: "160x80f", wantWidth: 59, wantHeight: 80},
 	}
 
 	for _, tt := range tests {
@@ -108,46 +111,112 @@ func TestUltraHDRBackendGeometryModes(t *testing.T) {
 	}
 }
 
-func TestUltraHDRBackendCropAnchorsDiffer(t *testing.T) {
+func TestUltraHDRBackendPreservesBaseCompositionForAspectResize(t *testing.T) {
 	input, err := os.ReadFile("../../tests/data/hdr/current-photo-1.jpg")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	modes := []struct {
-		name string
-		size string
-	}{
-		{name: "center", size: "160x80"},
-		{name: "top", size: "160x80t"},
-		{name: "bottom", size: "160x80b"},
+	result, err := Create(input, Options{Size: "1200x0", OriginalName: "current-photo-1.jpg", OriginalContentType: "image/jpeg"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	decoded := map[string]image.Image{}
-	for _, mode := range modes {
-		result, err := Create(input, Options{Size: mode.size, OriginalName: "current-photo-1.jpg", OriginalContentType: "image/jpeg"})
-		if err != nil {
-			t.Fatalf("%s crop failed: %v", mode.name, err)
-		}
-		img, _, err := image.Decode(bytes.NewReader(result.Bytes))
-		if err != nil {
-			t.Fatalf("decode %s crop: %v", mode.name, err)
-		}
-		if img.Bounds().Dx() != 160 || img.Bounds().Dy() != 80 {
-			t.Fatalf("%s crop produced %v, want 160x80", mode.name, img.Bounds())
-		}
-		decoded[mode.name] = img
+	probe := probeWithLibUltraHDR(t, result.Bytes)
+	if !probe.Metadata || probe.GainmapWidth != probe.Width || probe.GainmapHeight != probe.Height {
+		t.Fatalf("thumbnail is not HDR-preserving: %+v", probe)
 	}
 
-	assertDifferentCrop := func(aName, bName string) {
-		t.Helper()
-		diff := averagePixelDifference(decoded[aName], decoded[bName])
-		if diff < 1.0 {
-			t.Fatalf("%s and %s crops are too similar (average RGB delta %.2f); crop anchor modes may be mapped to the same crop", aName, bName, diff)
+	thumb, _, err := image.Decode(bytes.NewReader(result.Bytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thumb.Bounds().Dx() != 1200 || thumb.Bounds().Dy() != 1600 {
+		t.Fatalf("unexpected thumbnail bounds: %v", thumb.Bounds())
+	}
+	if std := averageRGBStdDev(thumb); std < 5 {
+		t.Fatalf("thumbnail appears solid-color/corrupt; average RGB stddev %.2f", std)
+	}
+
+	base, err := imaging.Decode(bytes.NewReader(input), imaging.AutoOrientation(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := imaging.Resize(base, thumb.Bounds().Dx(), thumb.Bounds().Dy(), imaging.Linear)
+	if diff := averagePixelDifference(thumb, reference); diff > 20 {
+		t.Fatalf("thumbnail base composition drifted from ordinary aspect resize (average RGB delta %.2f)", diff)
+	}
+}
+
+func TestUltraHDRBackendMatchesPocketBaseGeometrySemantics(t *testing.T) {
+	input, err := os.ReadFile("../../tests/data/hdr/current-photo-1.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base, err := imaging.Decode(bytes.NewReader(input), imaging.AutoOrientation(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		size      string
+		reference *image.NRGBA
+	}{
+		{name: "center crop", size: "160x80", reference: imaging.Fill(base, 160, 80, imaging.Center, imaging.Linear)},
+		{name: "top crop", size: "160x80t", reference: imaging.Fill(base, 160, 80, imaging.Top, imaging.Linear)},
+		{name: "bottom crop", size: "160x80b", reference: imaging.Fill(base, 160, 80, imaging.Bottom, imaging.Linear)},
+		{name: "fit", size: "160x80f", reference: imaging.Fit(base, 160, 80, imaging.Linear)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := Create(input, Options{Size: tt.size, OriginalName: "current-photo-1.jpg", OriginalContentType: "image/jpeg"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			probe := probeWithLibUltraHDR(t, result.Bytes)
+			if !probe.Metadata || probe.GainmapWidth != probe.Width || probe.GainmapHeight != probe.Height {
+				t.Fatalf("thumbnail is not HDR-preserving: %+v", probe)
+			}
+			thumb, _, err := image.Decode(bytes.NewReader(result.Bytes))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if thumb.Bounds().Dx() != tt.reference.Bounds().Dx() || thumb.Bounds().Dy() != tt.reference.Bounds().Dy() {
+				t.Fatalf("%s produced %v, want %v", tt.size, thumb.Bounds(), tt.reference.Bounds())
+			}
+			if diff := averagePixelDifference(thumb, tt.reference); diff > 20 {
+				t.Fatalf("%s drifted from PocketBase geometry semantics (average RGB delta %.2f)", tt.size, diff)
+			}
+		})
+	}
+}
+
+func averageRGBStdDev(img image.Image) float64 {
+	b := img.Bounds()
+	var sum [3]float64
+	var sumSq [3]float64
+	pixels := float64(b.Dx() * b.Dy())
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bv, _ := img.At(x, y).RGBA()
+			vals := [3]float64{float64(r >> 8), float64(g >> 8), float64(bv >> 8)}
+			for i, v := range vals {
+				sum[i] += v
+				sumSq[i] += v * v
+			}
 		}
 	}
-	assertDifferentCrop("center", "top")
-	assertDifferentCrop("center", "bottom")
-	assertDifferentCrop("top", "bottom")
+	var total float64
+	for i := range sum {
+		mean := sum[i] / pixels
+		variance := sumSq[i]/pixels - mean*mean
+		if variance > 0 {
+			total += variance
+		}
+	}
+	return math.Sqrt(total / 3)
 }
 
 func averagePixelDifference(a, b image.Image) float64 {
