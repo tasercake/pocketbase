@@ -539,6 +539,153 @@ func TestFileDownload(t *testing.T) {
 	}
 }
 
+func TestFileDownloadPhotosClosestThumbSelection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		requested string
+		selected  string
+	}{
+		{"400x0", "400x0"},
+		{"401x0", "1200x0"},
+		{"800x0", "1200x0"},
+		{"1800x0", "2000x0"},
+		{"2400x0", "2000x0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.requested, func(t *testing.T) {
+			app, record, filename := setupThumbSelectionFileDownload(t, "photos")
+			defer app.Cleanup()
+
+			app.OnFileDownloadRequest().BindFunc(func(e *core.FileDownloadRequestEvent) error {
+				if e.ThumbError != nil {
+					t.Fatalf("Expected no thumb error, got %v", e.ThumbError)
+				}
+				wantServedName := tt.selected + "_" + filename
+				if e.ServedName != wantServedName {
+					t.Fatalf("ServedName = %q, want %q", e.ServedName, wantServedName)
+				}
+				return e.Next()
+			})
+
+			res := performFileRequest(t, app, "/api/files/photos/"+record.Id+"/"+filename+"?thumb="+tt.requested)
+			defer res.Body.Close()
+			body, _ := io.ReadAll(res.Body)
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("Expected status 200, got %d: %s", res.StatusCode, body)
+			}
+
+			fsys, err := app.NewFilesystem()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fsys.Close()
+			selectedPath := record.BaseFilesPath() + "/thumbs_" + filename + "/" + tt.selected + "_" + filename
+			if exists, _ := fsys.Exists(selectedPath); !exists {
+				t.Fatalf("Expected selected thumb %q to exist", selectedPath)
+			}
+			if tt.requested != tt.selected {
+				requestedPath := record.BaseFilesPath() + "/thumbs_" + filename + "/" + tt.requested + "_" + filename
+				if exists, _ := fsys.Exists(requestedPath); exists {
+					t.Fatalf("Did not expect requested unconfigured thumb %q to exist", requestedPath)
+				}
+			}
+		})
+	}
+}
+
+func TestFileDownloadNonPhotosThumbSelectionExactMatchOnly(t *testing.T) {
+	t.Parallel()
+
+	app, record, filename := setupThumbSelectionFileDownload(t, "photo_assets")
+	defer app.Cleanup()
+
+	app.OnFileDownloadRequest().BindFunc(func(e *core.FileDownloadRequestEvent) error {
+		if e.ThumbError == nil {
+			t.Fatal("Expected thumb error for non-photos unconfigured size, got nil")
+		}
+		if e.ServedName != filename {
+			t.Fatalf("ServedName = %q, want original filename %q", e.ServedName, filename)
+		}
+		return e.Next()
+	})
+
+	res := performFileRequest(t, app, "/api/files/photo_assets/"+record.Id+"/"+filename+"?thumb=800x0")
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("Expected fallback status 200, got %d: %s", res.StatusCode, body)
+	}
+
+	fsys, err := app.NewFilesystem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+	for _, size := range []string{"800x0", "1200x0"} {
+		thumbPath := record.BaseFilesPath() + "/thumbs_" + filename + "/" + size + "_" + filename
+		if exists, _ := fsys.Exists(thumbPath); exists {
+			t.Fatalf("Did not expect non-photos request to create thumb %q", thumbPath)
+		}
+	}
+}
+
+func setupThumbSelectionFileDownload(t *testing.T, collectionName string) (*tests.TestApp, *core.Record, string) {
+	t.Helper()
+
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	collection := core.NewBaseCollection(collectionName)
+	collection.Fields.Add(&core.FileField{
+		Name:      "image",
+		MaxSelect: 1,
+		MaxSize:   999999,
+		Thumbs:    []string{"400x0", "1200x0", "2000x0"},
+	})
+	if err := app.Save(collection); err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+
+	record := core.NewRecord(collection)
+	if err := app.Save(record); err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	filename := "photo.png"
+
+	_, currentFile, _, _ := runtime.Caller(0)
+	data, err := os.ReadFile(filepath.Join(path.Dir(currentFile), "../tests/data/storage/_pb_users_auth_/4q1xlclmfloku33/300_1SEi6Q6U72.png"))
+	if err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	fsys, err := app.NewFilesystem()
+	if err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+	if err := fsys.Upload(data, record.BaseFilesPath()+"/"+filename); err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	if _, err := app.DB().NewQuery("UPDATE " + collection.Name + " SET image={:filename} WHERE id={:id}").Bind(map[string]any{
+		"filename": filename,
+		"id":       record.Id,
+	}).Execute(); err != nil {
+		app.Cleanup()
+		t.Fatal(err)
+	}
+	record.SetRaw("image", filename)
+
+	return app, record, filename
+}
+
 func TestFileDownloadHDRRequiredNoFallbackOrHook(t *testing.T) {
 	if hdrthumb.Available() {
 		t.Skip("HDR backend is available in this build")
