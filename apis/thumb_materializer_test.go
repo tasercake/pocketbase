@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/pocketbase/pocketbase/core"
@@ -26,7 +27,7 @@ func TestGalleryMediaURLEscapesPathSegments(t *testing.T) {
 func TestGalleryMaterializerSkipsUnpublishedRecords(t *testing.T) {
 	record := newGalleryTestRecord(false, "photo.jpg")
 
-	urls, err := sharedThumbMaterializer.materializeGalleryRecord(nil, nil, record)
+	urls, err := newThumbMaterializerFromEnv().materializeGalleryRecord(nil, nil, record)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +48,8 @@ func TestGalleryMaterializerRejectsSDRSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	urls, err := sharedThumbMaterializer.materializeGalleryRecord(nil, fsys, record)
+	materializer := newThumbMaterializerFromEnv()
+	urls, err := materializer.materializeGalleryRecord(nil, fsys, record)
 	if err == nil {
 		t.Fatalf("expected HDR-required error, got urls %#v", urls)
 	}
@@ -56,6 +58,9 @@ func TestGalleryMaterializerRejectsSDRSource(t *testing.T) {
 	}
 	if record.Get("urls") != nil {
 		t.Fatalf("expected no partial urls after failure, got %#v", record.Get("urls"))
+	}
+	if _, ok := materializer.cachedGalleryURLs(record); ok {
+		t.Fatalf("expected SDR source failure not to populate readiness cache")
 	}
 }
 
@@ -68,17 +73,18 @@ func TestGalleryMaterializerReturnsExistingHDRThumbURLs(t *testing.T) {
 	if err != nil {
 		t.Skipf("HDR fixture unavailable: %v", err)
 	}
-	if err := fsys.Upload(data, record.BaseFilesPath()+"/current photo.jpg"); err != nil {
-		t.Fatal(err)
-	}
 
+	// Intentionally upload only the thumbnails, not the original source. The
+	// already-materialized cold path should verify the thumbnail bytes themselves
+	// and avoid full original-file HDR detection before returning URLs.
 	for _, size := range galleryHDRThumbSizes {
 		if err := fsys.Upload(data, galleryHDRThumbPath(record.BaseFilesPath(), "current photo.jpg", size)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	urls, err := sharedThumbMaterializer.materializeGalleryRecord(nil, fsys, record)
+	materializer := newThumbMaterializerFromEnv()
+	urls, err := materializer.materializeGalleryRecord(nil, fsys, record)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +102,109 @@ func TestGalleryMaterializerReturnsExistingHDRThumbURLs(t *testing.T) {
 			t.Fatalf("url was not escaped: %q", urls[key])
 		}
 	}
+	if _, ok := materializer.cachedGalleryURLs(record); !ok {
+		t.Fatalf("expected existing verified HDR thumbs to populate readiness cache")
+	}
+}
+
+func TestGalleryMaterializerCacheHitAvoidsFilesystem(t *testing.T) {
+	fsys, cleanup := newLocalTestFS(t)
+	defer cleanup()
+
+	record := newGalleryTestRecord(true, "cached photo.jpg")
+	data, err := os.ReadFile(filepath.Join("..", "tests", "data", "hdr", "current-photo-1.jpg"))
+	if err != nil {
+		t.Skipf("HDR fixture unavailable: %v", err)
+	}
+	for _, size := range galleryHDRThumbSizes {
+		if err := fsys.Upload(data, galleryHDRThumbPath(record.BaseFilesPath(), "cached photo.jpg", size)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	materializer := newThumbMaterializerFromEnv()
+	want, err := materializer.materializeGalleryRecord(nil, fsys, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := materializer.materializeGalleryRecord(nil, nil, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) || got["thumb400"] != want["thumb400"] || got["thumb1200"] != want["thumb1200"] || got["thumb2000"] != want["thumb2000"] {
+		t.Fatalf("cache hit urls = %#v, want %#v", got, want)
+	}
+}
+
+func TestGalleryMaterializerCacheKeyChanges(t *testing.T) {
+	materializer := newThumbMaterializerFromEnv()
+	record := newGalleryTestRecord(true, "photo-a.jpg")
+	materializer.storeGalleryReady(record)
+	if _, ok := materializer.cachedGalleryURLs(record); !ok {
+		t.Fatalf("expected original record cache hit")
+	}
+
+	renamed := newGalleryTestRecord(true, "photo-b.jpg")
+	if _, ok := materializer.cachedGalleryURLs(renamed); ok {
+		t.Fatalf("expected filename change to miss readiness cache")
+	}
+
+	updated := newGalleryTestRecord(true, "photo-a.jpg")
+	updated.SetRaw("updated", "2026-05-26 10:00:00.000Z")
+	if _, ok := materializer.cachedGalleryURLs(updated); ok {
+		t.Fatalf("expected updated timestamp change to miss readiness cache")
+	}
+}
+
+func TestGalleryMaterializerCacheConcurrentHits(t *testing.T) {
+	materializer := newThumbMaterializerFromEnv()
+	record := newGalleryTestRecord(true, "parallel photo.jpg")
+	materializer.storeGalleryReady(record)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				urls, ok := materializer.cachedGalleryURLs(record)
+				if !ok || len(urls) != len(galleryHDRThumbSizes) {
+					t.Errorf("expected concurrent cache hit, got ok=%v urls=%#v", ok, urls)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestGalleryMaterializerExistingSDRThumbsDoNotBypassHDRSourceValidation(t *testing.T) {
+	fsys, cleanup := newLocalTestFS(t)
+	defer cleanup()
+
+	record := newGalleryTestRecord(true, "photo.jpg")
+	data := smallJPEG(t)
+	if err := fsys.Upload(data, record.BaseFilesPath()+"/photo.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range galleryHDRThumbSizes {
+		if err := fsys.Upload(data, galleryHDRThumbPath(record.BaseFilesPath(), "photo.jpg", size)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	materializer := newThumbMaterializerFromEnv()
+	urls, err := materializer.materializeGalleryRecord(nil, fsys, record)
+	if err == nil {
+		t.Fatalf("expected HDR-required error, got urls %#v", urls)
+	}
+	if !errors.Is(err, hdrthumb.ErrHDRRequired) {
+		t.Fatalf("expected ErrHDRRequired, got %v", err)
+	}
+	if _, ok := materializer.cachedGalleryURLs(record); ok {
+		t.Fatalf("expected invalid existing thumbs not to populate readiness cache")
+	}
 }
 
 func newGalleryTestRecord(published bool, filename string) *core.Record {
@@ -110,6 +219,7 @@ func newGalleryTestRecord(published bool, filename string) *core.Record {
 	record.Id = "record1"
 	record.Set("published", published)
 	record.Set("image", filename)
+	record.SetRaw("updated", "2026-05-26 09:00:00.000Z")
 	return record
 }
 

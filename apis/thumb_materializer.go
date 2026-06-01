@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pocketbase/pocketbase/core"
@@ -27,9 +28,10 @@ var galleryHDRThumbSizes = []string{"400x0", "1200x0", "2000x0"}
 var sharedThumbMaterializer = newThumbMaterializerFromEnv()
 
 type thumbMaterializer struct {
-	sem     *semaphore.Weighted
-	pending *singleflight.Group
-	maxWait time.Duration
+	sem            *semaphore.Weighted
+	pending        *singleflight.Group
+	maxWait        time.Duration
+	readinessCache sync.Map
 }
 
 func newThumbMaterializerFromEnv() *thumbMaterializer {
@@ -70,7 +72,11 @@ func (m *thumbMaterializer) createThumb(ctx context.Context, fsys *filesystem.Sy
 }
 
 func (m *thumbMaterializer) detectHDRSource(fsys *filesystem.System, originalPath string, contentType string) (hdrthumb.Detection, error) {
-	r, err := fsys.GetReader(originalPath)
+	return detectHDRObject(fsys, originalPath, contentType)
+}
+
+func detectHDRObject(fsys *filesystem.System, path string, contentType string) (hdrthumb.Detection, error) {
+	r, err := fsys.GetReader(path)
 	if err != nil {
 		return hdrthumb.Detection{}, err
 	}
@@ -85,14 +91,19 @@ func (m *thumbMaterializer) detectHDRSource(fsys *filesystem.System, originalPat
 }
 
 func attachGalleryPhotoURLs(e *core.RequestEvent, records ...*core.Record) error {
-	var needsFilesystem bool
+	var misses []*core.Record
 	for _, record := range records {
-		if record != nil && record.Collection().Name == "photos" && record.GetBool("published") {
-			needsFilesystem = true
-			break
+		if !isPublishedPhotoRecord(record) {
+			continue
 		}
+		if urls, ok := sharedThumbMaterializer.cachedGalleryURLs(record); ok {
+			record.Set("urls", urls)
+			record.WithCustomData(true)
+			continue
+		}
+		misses = append(misses, record)
 	}
-	if !needsFilesystem {
+	if len(misses) == 0 {
 		return nil
 	}
 
@@ -102,7 +113,7 @@ func attachGalleryPhotoURLs(e *core.RequestEvent, records ...*core.Record) error
 	}
 	defer fsys.Close()
 
-	for _, record := range records {
+	for _, record := range misses {
 		urls, err := sharedThumbMaterializer.materializeGalleryRecord(e.Request.Context(), fsys, record)
 		if err != nil {
 			return err
@@ -117,36 +128,49 @@ func attachGalleryPhotoURLs(e *core.RequestEvent, records ...*core.Record) error
 }
 
 func (m *thumbMaterializer) materializeGalleryRecord(ctx context.Context, fsys *filesystem.System, record *core.Record) (map[string]string, error) {
-	if record == nil || record.Collection().Name != "photos" {
+	if !isPublishedPhotoRecord(record) {
 		return nil, nil
 	}
-
-	// CDN URLs are public, so expose them only for records explicitly published.
-	if !record.GetBool("published") {
-		return nil, nil
+	if urls, ok := m.cachedGalleryURLs(record); ok {
+		return urls, nil
 	}
 
-	filename := record.GetString("image")
-	if filename == "" {
-		files := record.GetStringSlice("image")
-		if len(files) > 0 {
-			filename = files[0]
-		}
+	filename, err := galleryRecordFilename(record)
+	if err != nil {
+		return nil, err
 	}
-	if filename == "" {
-		return nil, fmt.Errorf("published photo %q has no image file", record.Id)
-	}
-
-	fileField, _ := record.Collection().Fields.GetByName("image").(*core.FileField)
-	if fileField == nil {
-		return nil, fmt.Errorf("published photo %q is missing image file field", record.Id)
-	}
-	if fileField.MaxSelect > 1 && len(record.GetStringSlice("image")) != 1 {
-		return nil, fmt.Errorf("published photo %q must have exactly one image file", record.Id)
-	}
-
 	baseFilesPath := record.BaseFilesPath()
 	originalPath := baseFilesPath + "/" + filename
+
+	urls := makeGalleryURLs(baseFilesPath, filename)
+	badThumbs := make(map[string]struct{})
+	allExistingGood := true
+	for _, size := range galleryHDRThumbSizes {
+		thumbPath := galleryHDRThumbPath(baseFilesPath, filename, size)
+		attrs, err := fsys.Attributes(thumbPath)
+		if err != nil {
+			if errors.Is(err, filesystem.ErrNotFound) {
+				badThumbs[size] = struct{}{}
+				allExistingGood = false
+				continue
+			}
+			return nil, fmt.Errorf("failed to inspect HDR thumbnail %s for published photo %q: %w", size, record.Id, err)
+		}
+		if attrs.ContentType != "image/jpeg" {
+			badThumbs[size] = struct{}{}
+			allExistingGood = false
+			continue
+		}
+		detected, err := detectHDRObject(fsys, thumbPath, attrs.ContentType)
+		if err != nil || detected.Kind != hdrthumb.KindUltraHDRJPEG {
+			badThumbs[size] = struct{}{}
+			allExistingGood = false
+		}
+	}
+	if allExistingGood {
+		m.storeGalleryReady(record)
+		return urls, nil
+	}
 
 	oAttrs, err := fsys.Attributes(originalPath)
 	if err != nil {
@@ -167,20 +191,23 @@ func (m *thumbMaterializer) materializeGalleryRecord(ctx context.Context, fsys *
 		return nil, hdrthumb.NewError(hdrthumb.ErrUnsupportedHDRKind, detected.Kind, filename, strings.Join(galleryHDRThumbSizes, ","), "only Ultra HDR JPEG gallery thumbnails are currently supported")
 	}
 
-	urls := make(map[string]string, len(galleryHDRThumbSizes))
+	for _, size := range galleryHDRThumbSizes {
+		if _, ok := badThumbs[size]; !ok {
+			continue
+		}
+		thumbPath := galleryHDRThumbPath(baseFilesPath, filename, size)
+		if err := m.createThumb(ctx, fsys, originalPath, thumbPath, filesystem.ThumbOptions{
+			Size:              size,
+			HdrEnabled:        true,
+			HdrPolicy:         core.FileFieldHdrThumbsPolicyRequire,
+			SourceContentType: oAttrs.ContentType,
+		}); err != nil {
+			return nil, fmt.Errorf("failed to materialize HDR thumbnail %s for published photo %q: %w", size, record.Id, err)
+		}
+	}
+
 	for _, size := range galleryHDRThumbSizes {
 		thumbPath := galleryHDRThumbPath(baseFilesPath, filename, size)
-		if exists, _ := fsys.Exists(thumbPath); !exists {
-			if err := m.createThumb(ctx, fsys, originalPath, thumbPath, filesystem.ThumbOptions{
-				Size:              size,
-				HdrEnabled:        true,
-				HdrPolicy:         core.FileFieldHdrThumbsPolicyRequire,
-				SourceContentType: oAttrs.ContentType,
-			}); err != nil {
-				return nil, fmt.Errorf("failed to materialize HDR thumbnail %s for published photo %q: %w", size, record.Id, err)
-			}
-		}
-
 		attrs, err := fsys.Attributes(thumbPath)
 		if err != nil {
 			return nil, fmt.Errorf("materialized HDR thumbnail %s for published photo %q is missing: %w", size, record.Id, err)
@@ -188,11 +215,83 @@ func (m *thumbMaterializer) materializeGalleryRecord(ctx context.Context, fsys *
 		if attrs.ContentType != "image/jpeg" {
 			return nil, fmt.Errorf("materialized HDR thumbnail %s for published photo %q has unexpected content type %q", size, record.Id, attrs.ContentType)
 		}
-
-		urls[galleryThumbURLField(size)] = galleryMediaURL(thumbPath)
+		detected, err := detectHDRObject(fsys, thumbPath, attrs.ContentType)
+		if err != nil {
+			return nil, fmt.Errorf("published photo %q materialized HDR thumbnail %s detection failed: %w", record.Id, size, err)
+		}
+		if detected.Kind != hdrthumb.KindUltraHDRJPEG {
+			return nil, hdrthumb.NewError(hdrthumb.ErrHDRRequired, detected.Kind, filename, size, "published gallery thumbnail is not HDR-capable")
+		}
 	}
 
+	m.storeGalleryReady(record)
 	return urls, nil
+}
+
+func isPublishedPhotoRecord(record *core.Record) bool {
+	return record != nil && record.Collection().Name == "photos" && record.GetBool("published")
+}
+
+func galleryRecordFilename(record *core.Record) (string, error) {
+	filename := record.GetString("image")
+	if filename == "" {
+		files := record.GetStringSlice("image")
+		if len(files) > 0 {
+			filename = files[0]
+		}
+	}
+	if filename == "" {
+		return "", fmt.Errorf("published photo %q has no image file", record.Id)
+	}
+
+	fileField, _ := record.Collection().Fields.GetByName("image").(*core.FileField)
+	if fileField == nil {
+		return "", fmt.Errorf("published photo %q is missing image file field", record.Id)
+	}
+	if fileField.MaxSelect > 1 && len(record.GetStringSlice("image")) != 1 {
+		return "", fmt.Errorf("published photo %q must have exactly one image file", record.Id)
+	}
+
+	return filename, nil
+}
+
+func (m *thumbMaterializer) cachedGalleryURLs(record *core.Record) (map[string]string, bool) {
+	filename, err := galleryRecordFilename(record)
+	if err != nil {
+		return nil, false
+	}
+	if _, ok := m.readinessCache.Load(galleryReadinessCacheKey(record, filename)); !ok {
+		return nil, false
+	}
+	return makeGalleryURLs(record.BaseFilesPath(), filename), true
+}
+
+func (m *thumbMaterializer) storeGalleryReady(record *core.Record) {
+	filename, err := galleryRecordFilename(record)
+	if err != nil {
+		return
+	}
+	m.readinessCache.Store(galleryReadinessCacheKey(record, filename), struct{}{})
+}
+
+func galleryReadinessCacheKey(record *core.Record, filename string) string {
+	return strings.Join([]string{
+		record.Collection().Id,
+		record.Collection().Name,
+		record.Id,
+		filename,
+		record.GetString("updated"),
+		strings.Join(galleryHDRThumbSizes, ","),
+	}, "\x00")
+}
+
+func makeGalleryURLs(baseFilesPath, filename string) map[string]string {
+	urls := make(map[string]string, len(galleryHDRThumbSizes))
+	for _, size := range galleryHDRThumbSizes {
+		thumbPath := galleryHDRThumbPath(baseFilesPath, filename, size)
+		urls[galleryThumbURLField(size)] = galleryMediaURL(thumbPath)
+	}
+	return urls
 }
 
 func galleryHDRThumbPath(baseFilesPath, filename, size string) string {

@@ -137,7 +137,8 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 
 	// check for valid thumb size param
 	thumbSize := e.Request.URL.Query().Get("thumb")
-	if thumbSize != "" && (list.ExistInSlice(thumbSize, defaultThumbSizes) || list.ExistInSlice(thumbSize, effectiveFileField.Thumbs)) {
+	selectedThumbSize, shouldHandleThumb := selectThumbSize(collection.Name, thumbSize, availableThumbSizes(effectiveFileField.Thumbs))
+	if shouldHandleThumb {
 		// extract the original file meta attributes and check it existence
 		oAttrs, oAttrsErr := fsys.Attributes(originalPath)
 		if oAttrsErr != nil {
@@ -158,7 +159,7 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 			}
 
 			// add thumb size as file suffix
-			event.ServedName = thumbSize + "_" + filename
+			event.ServedName = selectedThumbSize + "_" + filename
 			thumbDirName := "thumbs_" + filename
 			if hdrRequired && isHDRSource {
 				thumbDirName = "thumbs_hdr_" + filename
@@ -168,7 +169,7 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 			// create a new thumb if it doesn't exist
 			if exists, _ := fsys.Exists(event.ServedPath); !exists {
 				thumbErr := api.createThumb(e, fsys, originalPath, event.ServedPath, filesystem.ThumbOptions{
-					Size:              thumbSize,
+					Size:              selectedThumbSize,
 					HdrEnabled:        effectiveFileField.HdrThumbs,
 					HdrPolicy:         effectiveFileField.HdrThumbsPolicy,
 					SourceContentType: oAttrs.ContentType,
