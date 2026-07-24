@@ -93,21 +93,32 @@ func backfillBlurhashes(app core.App) (updated, skipped int, err error) {
 				continue
 			}
 
-			result, err := app.DB().Update(collection.Name, dbx.Params{"blurhash": hash}, dbx.And(
-				dbx.HashExp{"id": record.Id},
-				dbx.NewExp("([[blurhash]] = '' OR [[blurhash]] IS NULL)"),
-			)).Execute()
+			didUpdate, err := updateBlurhashIfImageUnchanged(app, collection, record.Id, filename, hash)
 			if err != nil {
 				app.Logger().Warn("failed to save photo blurhash during backfill", "error", err, "recordId", record.Id)
 				skipped++
 				continue
 			}
-			affected, err := result.RowsAffected()
-			if err != nil || affected == 0 {
+			if !didUpdate {
 				skipped++
 				continue
 			}
 			updated++
 		}
 	}
+}
+
+// updateBlurhashIfImageUnchanged avoids attaching a hash to a file replacement
+// that completed while its predecessor was being decoded. It deliberately uses a
+// direct update so a derived field does not alter record recency or run hooks.
+func updateBlurhashIfImageUnchanged(app core.App, collection *core.Collection, recordID, image, hash string) (bool, error) {
+	result, err := app.DB().Update(collection.Name, dbx.Params{"blurhash": hash}, dbx.And(
+		dbx.HashExp{"id": recordID, "image": image},
+		dbx.NewExp("([[blurhash]] = '' OR [[blurhash]] IS NULL)"),
+	)).Execute()
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected > 0, err
 }

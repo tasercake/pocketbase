@@ -2,6 +2,7 @@
 package blurhash
 
 import (
+	"image"
 	"io"
 
 	blurhash "github.com/buckket/go-blurhash"
@@ -17,5 +18,9 @@ func ComputeBlurHash(r io.Reader) (string, error) {
 		return "", err
 	}
 
-	return blurhash.Encode(4, 3, imaging.Resize(img, 100, 0, imaging.Linear))
+	return blurhash.Encode(4, 3, resizeForBlurhash(img))
+}
+
+func resizeForBlurhash(img image.Image) image.Image {
+	return imaging.Fit(img, 100, 100, imaging.Linear)
 }

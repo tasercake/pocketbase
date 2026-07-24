@@ -35,6 +35,29 @@ func TestAddBlurhashFieldAddsTextFieldIdempotently(t *testing.T) {
 	}
 }
 
+func TestAddBlurhashFieldPreservesExistingTextFieldConfiguration(t *testing.T) {
+	app := newTestApp(t)
+
+	photos := core.NewBaseCollection("photos")
+	photos.Fields.Add(&core.TextField{Name: "blurhash", Max: 200})
+	if err := app.Save(photos); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := addBlurhashField(app); err != nil {
+		t.Fatal(err)
+	}
+
+	photos, err := app.FindCollectionByNameOrId("photos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field, ok := photos.Fields.GetByName("blurhash").(*core.TextField)
+	if !ok || field.Max != 200 {
+		t.Fatalf("blurhash field = %#v, want TextField with max 200", photos.Fields.GetByName("blurhash"))
+	}
+}
+
 func TestAddBlurhashFieldPreservesExistingNonTextField(t *testing.T) {
 	app := newTestApp(t)
 

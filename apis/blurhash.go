@@ -36,6 +36,9 @@ func computeRecordBlurhash(e *core.RecordRequestEvent) error {
 		return e.Next()
 	}
 
+	// A replacement must never retain the placeholder for the previous image.
+	e.Record.Set("blurhash", "")
+
 	r, err := files[0].Reader.Open()
 	if err != nil {
 		e.App.Logger().Warn("failed to open photo for blurhash generation", "error", err, "recordId", e.Record.Id)

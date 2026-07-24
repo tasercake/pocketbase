@@ -32,6 +32,13 @@ func TestComputeBlurHashJPEG(t *testing.T) {
 	}
 }
 
+func TestResizeForBlurhashBoundsBothDimensions(t *testing.T) {
+	resized := resizeForBlurhash(image.NewRGBA(image.Rect(0, 0, 1, 10000)))
+	if resized.Bounds().Dx() > 100 || resized.Bounds().Dy() > 100 {
+		t.Fatalf("resized dimensions = %dx%d, want each at most 100", resized.Bounds().Dx(), resized.Bounds().Dy())
+	}
+}
+
 func TestComputeBlurHashWebP(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "sample.webp"))
 	if err != nil {
@@ -39,6 +46,22 @@ func TestComputeBlurHashWebP(t *testing.T) {
 	}
 
 	hash, err := ComputeBlurHash(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash == "" {
+		t.Fatal("expected a blurhash")
+	}
+}
+
+func TestComputeBlurHashUltraHDRJPEG(t *testing.T) {
+	file, err := os.Open(filepath.Join("..", "..", "tests", "data", "hdr", "current-photo-1.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	hash, err := ComputeBlurHash(file)
 	if err != nil {
 		t.Fatal(err)
 	}

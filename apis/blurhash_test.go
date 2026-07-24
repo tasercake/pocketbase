@@ -1,6 +1,8 @@
 package apis
 
 import (
+	"bytes"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -131,6 +133,67 @@ func TestBlurhashUpdateHookReplacesHashForNewImage(t *testing.T) {
 	}
 	if got := persisted.GetString("blurhash"); got == "" || got == "old-hash" {
 		t.Fatalf("blurhash = %q, want replacement hash", got)
+	}
+}
+
+func TestBlurhashMultipartPatchClearsOldHashForCorruptReplacement(t *testing.T) {
+	app, photos := newBlurhashTestApp(t)
+	photos.UpdateRule = types.Pointer("")
+	if err := app.Save(photos); err != nil {
+		t.Fatal(err)
+	}
+
+	oldImage, err := filesystem.NewFileFromBytes(smallJPEG(t), "original.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := core.NewRecord(photos)
+	record.Set("image", oldImage)
+	record.Set("blurhash", "old-hash")
+	if err := app.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	oldFilename := record.GetString("image")
+
+	router, err := NewRouter(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux, err := router.BuildMux()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := new(bytes.Buffer)
+	form := multipart.NewWriter(body)
+	file, err := form.CreateFormFile("image", "replacement.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("not an image")); err != nil {
+		t.Fatal(err)
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPatch, "/api/collections/photos/records/"+record.Id, body)
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	persisted, err := app.FindRecordById(photos, record.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.GetString("image"); got == "" || got == oldFilename {
+		t.Fatalf("image = %q, want persisted replacement distinct from %q", got, oldFilename)
+	}
+	if got := persisted.GetString("blurhash"); got != "" {
+		t.Fatalf("blurhash = %q, want empty for corrupt replacement", got)
 	}
 }
 
