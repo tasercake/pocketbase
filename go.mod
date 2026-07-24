@@ -3,6 +3,7 @@ module github.com/pocketbase/pocketbase
 go 1.25.0
 
 require (
+	github.com/buckket/go-blurhash v1.1.0
 	github.com/disintegration/imaging v1.6.2
 	github.com/domodwyer/mailyak/v3 v3.6.2
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c

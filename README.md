@@ -42,6 +42,16 @@ Once downloaded, extract the archive and run `./pocketbase serve` in the extract
 
 The prebuilt executables are based on the [`examples/base/main.go` file](https://github.com/pocketbase/pocketbase/blob/master/examples/base/main.go) and comes with the JS VM plugin enabled by default which allows to extend PocketBase with JavaScript (_for more details please refer to [Extend with JavaScript](https://pocketbase.io/docs/js-overview/)_).
 
+### Photo BlurHash backfill
+
+This deployment stores BlurHash placeholders for the `photos` collection. After deploying the schema migration, generate placeholders for existing uploaded images with:
+
+```sh
+./pocketbase blurhash backfill
+```
+
+The command only fills empty hashes, preserves existing values, and skips unreadable or unsupported files. It is explicit and does not run during server startup.
+
 ### Use as a Go framework/toolkit
 
 PocketBase is distributed as a regular Go library package which allows you to build
