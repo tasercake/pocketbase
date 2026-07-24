@@ -17,6 +17,8 @@ const StaticWildcardParam = "path"
 
 // NewRouter returns a new router instance loaded with the default app middlewares and routes.
 func NewRouter(app core.App) (*router.Router[*core.RequestEvent], error) {
+	bindBlurhashHooks(app)
+
 	pbRouter := router.NewRouter(func(w http.ResponseWriter, r *http.Request) (*core.RequestEvent, router.EventCleanupFunc) {
 		event := new(core.RequestEvent)
 		event.Response = w
