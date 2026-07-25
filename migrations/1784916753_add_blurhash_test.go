@@ -30,8 +30,8 @@ func TestAddBlurhashFieldAddsTextFieldIdempotently(t *testing.T) {
 	if !ok {
 		t.Fatalf("blurhash field = %#v, want *core.TextField", photos.Fields.GetByName("blurhash"))
 	}
-	if field.Max != 100 {
-		t.Fatalf("blurhash field max = %d, want 100", field.Max)
+	if field.Max != 200 {
+		t.Fatalf("blurhash field max = %d, want 200", field.Max)
 	}
 }
 

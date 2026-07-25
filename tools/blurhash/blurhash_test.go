@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/buckket/go-blurhash/base83"
 )
 
 func TestComputeBlurHashJPEG(t *testing.T) {
@@ -29,6 +31,29 @@ func TestComputeBlurHashJPEG(t *testing.T) {
 	}
 	if hash == "" {
 		t.Fatal("expected a blurhash")
+	}
+}
+
+func TestComputeBlurHashUsesMaximumComponents(t *testing.T) {
+	data := new(bytes.Buffer)
+	if err := jpeg.Encode(data, image.NewRGBA(image.Rect(0, 0, 10, 10)), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	hash, err := ComputeBlurHash(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sizeFlag, err := base83.Decode(hash[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if horizontal := sizeFlag%9 + 1; horizontal != 9 {
+		t.Fatalf("horizontal components = %d, want 9", horizontal)
+	}
+	if vertical := sizeFlag/9 + 1; vertical != 9 {
+		t.Fatalf("vertical components = %d, want 9", vertical)
 	}
 }
 
@@ -55,18 +80,22 @@ func TestComputeBlurHashWebP(t *testing.T) {
 }
 
 func TestComputeBlurHashUltraHDRJPEG(t *testing.T) {
-	file, err := os.Open(filepath.Join("..", "..", "tests", "data", "hdr", "current-photo-1.jpg"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
+	for _, name := range []string{"current-photo-1.jpg", "current-photo-2.jpg", "current-photo-3.jpg"} {
+		t.Run(name, func(t *testing.T) {
+			file, err := os.Open(filepath.Join("..", "..", "tests", "data", "hdr", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
 
-	hash, err := ComputeBlurHash(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hash == "" {
-		t.Fatal("expected a blurhash")
+			hash, err := ComputeBlurHash(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hash == "" {
+				t.Fatal("expected a blurhash")
+			}
+		})
 	}
 }
 

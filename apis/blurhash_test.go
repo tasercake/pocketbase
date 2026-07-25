@@ -231,7 +231,7 @@ func newBlurhashTestApp(t *testing.T) (*core.BaseApp, *core.Collection) {
 	photos := core.NewBaseCollection("photos")
 	photos.Fields.Add(
 		&core.FileField{Name: "image", MaxSelect: 1},
-		&core.TextField{Name: "blurhash", Max: 100},
+		&core.TextField{Name: "blurhash", Max: 200},
 	)
 	if err := app.Save(photos); err != nil {
 		t.Fatal(err)

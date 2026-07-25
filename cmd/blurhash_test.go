@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buckket/go-blurhash/base83"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/cmd"
 	"github.com/pocketbase/pocketbase/core"
@@ -25,7 +26,7 @@ func TestBlurhashBackfillOnlyFillsMissingReadablePhotos(t *testing.T) {
 	photos := core.NewBaseCollection("photos")
 	photos.Fields.Add(
 		&core.FileField{Name: "image", MaxSelect: 1},
-		&core.TextField{Name: "blurhash", Max: 100},
+		&core.TextField{Name: "blurhash", Max: 200},
 	)
 	if err := app.Save(photos); err != nil {
 		t.Fatal(err)
@@ -66,6 +67,50 @@ func TestBlurhashBackfillOnlyFillsMissingReadablePhotos(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "updated=1") || !strings.Contains(output.String(), "skipped=1") {
 		t.Fatalf("summary = %q", output.String())
+	}
+}
+
+func TestBlurhashBackfillForceRecomputesExistingHashes(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+
+	photos := core.NewBaseCollection("photos")
+	photos.Fields.Add(
+		&core.FileField{Name: "image", MaxSelect: 1},
+		&core.TextField{Name: "blurhash", Max: 200},
+	)
+	if err := app.Save(photos); err != nil {
+		t.Fatal(err)
+	}
+
+	existing := savePhoto(t, app, photos, "existing.jpg", "old-hash")
+
+	command := cmd.NewBlurhashCommand(app)
+	command.SetArgs([]string{"backfill", "--force"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	existing, err = app.FindRecordById(photos, existing.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := existing.GetString("blurhash")
+	if hash == "old-hash" {
+		t.Fatal("force backfill preserved the old hash")
+	}
+	sizeFlag, err := base83.Decode(hash[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if horizontal := sizeFlag%9 + 1; horizontal != 9 {
+		t.Fatalf("horizontal components = %d, want 9", horizontal)
+	}
+	if vertical := sizeFlag/9 + 1; vertical != 9 {
+		t.Fatalf("vertical components = %d, want 9", vertical)
 	}
 }
 

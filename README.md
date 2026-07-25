@@ -44,13 +44,13 @@ The prebuilt executables are based on the [`examples/base/main.go` file](https:/
 
 ### Photo BlurHash backfill
 
-This deployment stores BlurHash placeholders for the `photos` collection. After deploying the schema migration, generate placeholders for existing uploaded images with:
+This deployment stores 9×9 BlurHash placeholders for the `photos` collection. After deploying the schema migration, generate placeholders for existing uploaded images with:
 
 ```sh
 ./pocketbase blurhash backfill
 ```
 
-The command only fills empty hashes, preserves existing values, and skips unreadable or unsupported files. It is explicit and does not run during server startup.
+The command only fills empty hashes, preserves existing values, and skips unreadable or unsupported files. Use `./pocketbase blurhash backfill --force` to safely recompute existing hashes while still comparing the image filename before each update. The command is explicit and does not run during server startup.
 
 ### Use as a Go framework/toolkit
 
