@@ -11,14 +11,14 @@ import (
 )
 
 // ComputeBlurHash decodes, auto-orients, and downsizes an image before
-// calculating its 4x3 BlurHash placeholder.
+// calculating its 9x9 BlurHash placeholder.
 func ComputeBlurHash(r io.Reader) (string, error) {
 	img, err := imaging.Decode(r, imaging.AutoOrientation(true))
 	if err != nil {
 		return "", err
 	}
 
-	return blurhash.Encode(4, 3, resizeForBlurhash(img))
+	return blurhash.Encode(9, 9, resizeForBlurhash(img))
 }
 
 func resizeForBlurhash(img image.Image) image.Image {

@@ -18,7 +18,7 @@ func TestUpdateBlurhashIfImageUnchangedSkipsReplacedImage(t *testing.T) {
 	photos := core.NewBaseCollection("photos")
 	photos.Fields.Add(
 		&core.FileField{Name: "image", MaxSelect: 1},
-		&core.TextField{Name: "blurhash", Max: 100},
+		&core.TextField{Name: "blurhash", Max: 200},
 	)
 	if err := app.Save(photos); err != nil {
 		t.Fatal(err)
@@ -32,19 +32,21 @@ func TestUpdateBlurhashIfImageUnchangedSkipsReplacedImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, err := updateBlurhashIfImageUnchanged(app, photos, record.Id, "original.jpg", "old-image-hash")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated {
-		t.Fatal("updated blurhash for a replacement image")
-	}
+	for _, force := range []bool{false, true} {
+		updated, err := updateBlurhashIfImageUnchanged(app, photos, record.Id, "original.jpg", "old-image-hash", force)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated {
+			t.Fatalf("force=%v: updated blurhash for a replacement image", force)
+		}
 
-	persisted, err := app.FindRecordById(photos, record.Id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := persisted.GetString("blurhash"); got != "" {
-		t.Fatalf("blurhash = %q, want empty", got)
+		persisted, err := app.FindRecordById(photos, record.Id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := persisted.GetString("blurhash"); got != "" {
+			t.Fatalf("force=%v: blurhash = %q, want empty", force, got)
+		}
 	}
 }

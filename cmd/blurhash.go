@@ -17,23 +17,26 @@ func NewBlurhashCommand(app core.App) *cobra.Command {
 		Use:   "blurhash",
 		Short: "Manage photo BlurHash placeholders",
 	}
-	command.AddCommand(&cobra.Command{
+	var force bool
+	backfill := &cobra.Command{
 		Use:          "backfill",
 		Short:        "Generate missing BlurHashes for stored photos",
 		SilenceUsage: true,
 		RunE: func(command *cobra.Command, args []string) error {
-			updated, skipped, err := backfillBlurhashes(app)
+			updated, skipped, err := backfillBlurhashes(app, force)
 			if err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintf(command.OutOrStdout(), "Blurhash backfill complete: updated=%d skipped=%d\n", updated, skipped)
 			return nil
 		},
-	})
+	}
+	backfill.Flags().BoolVar(&force, "force", false, "recompute existing BlurHashes")
+	command.AddCommand(backfill)
 	return command
 }
 
-func backfillBlurhashes(app core.App) (updated, skipped int, err error) {
+func backfillBlurhashes(app core.App, force bool) (updated, skipped int, err error) {
 	collection, err := app.FindCollectionByNameOrId("photos")
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, nil
@@ -70,7 +73,7 @@ func backfillBlurhashes(app core.App) (updated, skipped int, err error) {
 		lastID = records[len(records)-1].Id
 
 		for _, record := range records {
-			if record.GetString("blurhash") != "" {
+			if !force && record.GetString("blurhash") != "" {
 				continue
 			}
 			filename := record.GetString("image")
@@ -93,7 +96,7 @@ func backfillBlurhashes(app core.App) (updated, skipped int, err error) {
 				continue
 			}
 
-			didUpdate, err := updateBlurhashIfImageUnchanged(app, collection, record.Id, filename, hash)
+			didUpdate, err := updateBlurhashIfImageUnchanged(app, collection, record.Id, filename, hash, force)
 			if err != nil {
 				app.Logger().Warn("failed to save photo blurhash during backfill", "error", err, "recordId", record.Id)
 				skipped++
@@ -111,11 +114,12 @@ func backfillBlurhashes(app core.App) (updated, skipped int, err error) {
 // updateBlurhashIfImageUnchanged avoids attaching a hash to a file replacement
 // that completed while its predecessor was being decoded. It deliberately uses a
 // direct update so a derived field does not alter record recency or run hooks.
-func updateBlurhashIfImageUnchanged(app core.App, collection *core.Collection, recordID, image, hash string) (bool, error) {
-	result, err := app.DB().Update(collection.Name, dbx.Params{"blurhash": hash}, dbx.And(
-		dbx.HashExp{"id": recordID, "image": image},
-		dbx.NewExp("([[blurhash]] = '' OR [[blurhash]] IS NULL)"),
-	)).Execute()
+func updateBlurhashIfImageUnchanged(app core.App, collection *core.Collection, recordID, image, hash string, force bool) (bool, error) {
+	var where dbx.Expression = dbx.HashExp{"id": recordID, "image": image}
+	if !force {
+		where = dbx.And(where, dbx.NewExp("([[blurhash]] = '' OR [[blurhash]] IS NULL)"))
+	}
+	result, err := app.DB().Update(collection.Name, dbx.Params{"blurhash": hash}, where).Execute()
 	if err != nil {
 		return false, err
 	}

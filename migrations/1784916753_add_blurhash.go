@@ -45,6 +45,6 @@ func addBlurhashField(app core.App) error {
 		return nil
 	}
 
-	collection.Fields.Add(&core.TextField{Name: "blurhash", Max: 100})
+	collection.Fields.Add(&core.TextField{Name: "blurhash", Max: 200})
 	return app.Save(collection)
 }
