@@ -23,6 +23,14 @@ sudo cp ./pocketbase /opt/pocketbase/pocketbase
 sudo systemctl start pocketbase
 ```
 
+4. Run the versioned gallery backfill after the new binary and helper are available:
+
+```sh
+pocketbase gallery-thumbs backfill --workers=4
+```
+
+The backfill is idempotent. It processes published photos with bounded concurrency, resumes missing or invalid variants on retry, and never deletes an older generation.
+
 If the helper is not under the service working directory, configure systemd with:
 
 ```text
@@ -36,40 +44,42 @@ sudo systemctl daemon-reload
 sudo systemctl restart pocketbase
 ```
 
-## Cache behavior
+## Versioned cache behavior
 
-HDR-required thumbnails for detected HDR sources are stored separately from standard thumbnails:
+Progressive Ultra HDR gallery variants use an immutable generation path:
+
+```text
+thumbs_hdr_{filename}/uhdr-pjpeg-v1/{size}_{filename}
+```
+
+Objects include generation metadata and:
+
+```text
+Cache-Control: public, max-age=31536000, immutable
+```
+
+Legacy HDR thumbnails remain under:
 
 ```text
 thumbs_hdr_{filename}/{size}_{filename}
 ```
 
-Standard thumbnails remain under:
+Newly published or updated photos eagerly generate their complete set on the write request. A small `_ready` manifest is written only after all `400x0`, `1200x0`, and `2000x0` objects pass Ultra HDR full decode, progressive-primary, multi-scan, ICC, MPF/XMP/ISO metadata, dimensions, chroma, highlights, clipping, and cache validation. Gallery reads use legacy URLs until that manifest exists. Reads check the persistent manifest and object attributes instead of synchronously rebuilding or downloading every variant. After readiness, both gallery CDN URLs and normal `/api/files` requests switch to the versioned generation.
 
-```text
-thumbs_{filename}/{size}_{filename}
-```
+## Rollback and cleanup
 
-This separation prevents a previously generated SDR thumbnail from satisfying an HDR-required request.
+Rollback can point clients at retained legacy objects. Do not purge legacy or prior generation objects during deployment or backfill. CDN TTLs and active clients may still reference them.
 
-## Clearing and regenerating thumbnails
-
-Delete the relevant thumbnail prefix from the active storage backend, then request the file URL again.
-
-For local filesystem storage, remove the matching directory below the record files path. For S3/R2 storage, delete keys matching:
-
-```text
-{collectionId}/{recordId}/thumbs_hdr_{filename}/
-```
-
-The next `?thumb=` request regenerates and stores the thumbnail through the configured storage backend.
+Cleanup is a separate, explicit later operation after compatibility validation and the rollback window. Scope deletion to a named obsolete generation; never delete the whole `thumbs_hdr_{filename}/` prefix.
 
 ## Verification checklist
 
-- `systemctl status pocketbase` is healthy.
+- PocketBase service is healthy.
 - `photos.image` has `hdrThumbs=true` and `hdrThumbsPolicy=require`.
-- `curl -fL '?thumb=1200x0'` returns `image/jpeg`.
-- `hdrthumb-helper probe` succeeds on the downloaded thumbnail.
-- R2 contains `thumbs_hdr_{filename}/1200x0_{filename}`.
-- Original object hash matches the pre-deploy hash.
-- A non-HDR image thumbnail still returns successfully.
+- `pocketbase gallery-thumbs backfill --workers=4` reports `failed=0`.
+- R2 contains all three `uhdr-pjpeg-v1` objects for every published photo.
+- Objects have immutable cache control and `pocketbase-thumb-generation=uhdr-pjpeg-v1` metadata.
+- First primary SOF is `FFC2`, with multiple primary SOS scans and 4:2:0 sampling.
+- Gain-map JPEG remains baseline and `hdrthumb-helper probe` succeeds.
+- MPF, XMP, and ISO 21496 metadata remain present.
+- Original object hash and retained legacy object hashes are unchanged.

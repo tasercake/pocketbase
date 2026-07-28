@@ -102,7 +102,7 @@ func recordsList(e *core.RequestEvent) error {
 		}
 
 		if err := attachGalleryPhotoURLs(e.RequestEvent, e.Records...); err != nil {
-			return e.Error(http.StatusServiceUnavailable, "Failed to materialize gallery thumbnails.", err)
+			return e.Error(http.StatusServiceUnavailable, "Failed to resolve gallery thumbnails.", err)
 		}
 
 		// Add a randomized throttle in case of too many empty search filter attempts.
@@ -205,7 +205,7 @@ func recordView(e *core.RequestEvent) error {
 		}
 
 		if err := attachGalleryPhotoURLs(e.RequestEvent, e.Record); err != nil {
-			return e.Error(http.StatusServiceUnavailable, "Failed to materialize gallery thumbnails.", err)
+			return e.Error(http.StatusServiceUnavailable, "Failed to resolve gallery thumbnails.", err)
 		}
 
 		return execAfterSuccessTx(true, e.App, func() error {
@@ -355,9 +355,24 @@ func recordCreate(responseWriteAfterTx bool, optFinalizer func(data any) error) 
 			form.SetApp(e.App)
 			form.SetRecord(e.Record)
 
+			publishGallery := isPublishedPhotoRecord(e.Record)
+			if publishGallery {
+				e.Record.Set("published", false)
+			}
 			err := form.Submit()
 			if err != nil {
 				return firstApiError(err, e.BadRequestError("Failed to create record", err))
+			}
+			if publishGallery {
+				e.Record.Set("published", true)
+				if err = materializeGalleryPhotoOnWrite(e.RequestEvent, e.Record); err != nil {
+					e.Record.Set("published", false)
+					return e.Error(http.StatusServiceUnavailable, "Failed to materialize gallery thumbnails; record remains unpublished.", err)
+				}
+				if err = exposeMaterializedGalleryPhoto(e.App, e.Record); err != nil {
+					e.Record.Set("published", false)
+					return e.InternalServerError("Failed to publish materialized gallery photo.", err)
+				}
 			}
 
 			err = EnrichRecord(e.RequestEvent, e.Record)
@@ -494,9 +509,24 @@ func recordUpdate(responseWriteAfterTx bool, optFinalizer func(data any) error) 
 			form.SetApp(e.App)
 			form.SetRecord(e.Record)
 
+			publishGallery := isPublishedPhotoRecord(e.Record)
+			if publishGallery {
+				e.Record.Set("published", false)
+			}
 			err := form.Submit()
 			if err != nil {
 				return firstApiError(err, e.BadRequestError("Failed to update record.", err))
+			}
+			if publishGallery {
+				e.Record.Set("published", true)
+				if err = materializeGalleryPhotoOnWrite(e.RequestEvent, e.Record); err != nil {
+					e.Record.Set("published", false)
+					return e.Error(http.StatusServiceUnavailable, "Failed to materialize gallery thumbnails; record remains unpublished.", err)
+				}
+				if err = exposeMaterializedGalleryPhoto(e.App, e.Record); err != nil {
+					e.Record.Set("published", false)
+					return e.InternalServerError("Failed to publish materialized gallery photo.", err)
+				}
 			}
 
 			err = EnrichRecord(e.RequestEvent, e.Record)

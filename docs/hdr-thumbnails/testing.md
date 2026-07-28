@@ -41,8 +41,10 @@ For a generated thumbnail, verify:
 
 - HTTP response content type is `image/jpeg`.
 - Requested dimensions match the `thumb` geometry.
-- Pure-Go marker scan still finds MPF and ISO 21496/JPEG_R metadata.
-- The libultrahdr helper can probe/decode the generated file.
+- The first JPEG codestream has progressive SOF2, explicit 4:2:0 sampling, ICC, and multiple SOS scans.
+- The appended gain-map JPEG remains baseline.
+- Pure-Go marker scan still finds MPF, XMP, and ISO 21496/JPEG_R metadata.
+- The libultrahdr helper can fully probe/decode the generated file, including nontrivial HDR highlights.
 
 Example helper probe:
 

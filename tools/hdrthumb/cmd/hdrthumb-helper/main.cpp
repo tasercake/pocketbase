@@ -1,4 +1,5 @@
 #include "ultrahdr_api.h"
+#include "srgb_icc.h"
 
 #include <cstdio>
 #include <jpeglib.h>
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 static void die(const std::string& msg) {
@@ -236,6 +238,66 @@ static RGBImage decodeJpegRGB(const void* data, size_t size) {
   return img;
 }
 
+static std::vector<unsigned char> encodeProgressiveJpeg(const RGBImage& img) {
+  jpeg_compress_struct cinfo{};
+  JpegError err{};
+  cinfo.err = jpeg_std_error(&err.pub);
+  err.pub.error_exit = jpegErrorExit;
+  unsigned char* output = nullptr;
+  unsigned long outputSize = 0;
+  if (setjmp(err.jump)) {
+    jpeg_destroy_compress(&cinfo);
+    std::free(output);
+    die(std::string("jpeg encode failed: ") + err.msg);
+  }
+
+  jpeg_create_compress(&cinfo);
+  jpeg_mem_dest(&cinfo, &output, &outputSize);
+  cinfo.image_width = img.w;
+  cinfo.image_height = img.h;
+  cinfo.input_components = 3;
+  cinfo.in_color_space = JCS_RGB;
+  jpeg_set_defaults(&cinfo);
+  jpeg_set_quality(&cinfo, 90, TRUE);
+
+  // Explicit 4:2:0, independent of libjpeg implementation defaults.
+  cinfo.comp_info[0].h_samp_factor = 2;
+  cinfo.comp_info[0].v_samp_factor = 2;
+  cinfo.comp_info[1].h_samp_factor = 1;
+  cinfo.comp_info[1].v_samp_factor = 1;
+  cinfo.comp_info[2].h_samp_factor = 1;
+  cinfo.comp_info[2].v_samp_factor = 1;
+  jpeg_simple_progression(&cinfo);
+  cinfo.optimize_coding = TRUE;
+  jpeg_start_compress(&cinfo, TRUE);
+
+  // ICC_PROFILE APP2 payload: signature, one-based sequence, segment count, data.
+  constexpr size_t kICCHeaderSize = 14;
+  constexpr size_t kMaxICCChunk = 65533 - kICCHeaderSize;
+  const int segmentCount = static_cast<int>((kSRGBICC_len + kMaxICCChunk - 1) / kMaxICCChunk);
+  for (int segment = 0; segment < segmentCount; segment++) {
+    const size_t offset = static_cast<size_t>(segment) * kMaxICCChunk;
+    const size_t chunk = std::min(kMaxICCChunk, static_cast<size_t>(kSRGBICC_len) - offset);
+    std::vector<unsigned char> marker(kICCHeaderSize + chunk);
+    std::memcpy(marker.data(), "ICC_PROFILE\0", 12);
+    marker[12] = static_cast<unsigned char>(segment + 1);
+    marker[13] = static_cast<unsigned char>(segmentCount);
+    std::memcpy(marker.data() + kICCHeaderSize, kSRGBICC + offset, chunk);
+    jpeg_write_marker(&cinfo, JPEG_APP0 + 2, marker.data(), marker.size());
+  }
+
+  while (cinfo.next_scanline < cinfo.image_height) {
+    JSAMPROW row = const_cast<JSAMPROW>(
+        &img.px[static_cast<size_t>(cinfo.next_scanline) * img.w * 3]);
+    jpeg_write_scanlines(&cinfo, &row, 1);
+  }
+  jpeg_finish_compress(&cinfo);
+  std::vector<unsigned char> result(output, output + outputSize);
+  jpeg_destroy_compress(&cinfo);
+  std::free(output);
+  return result;
+}
+
 static RGBImage resizeRGB(const RGBImage& src, const Geometry& g) {
   RGBImage dst;
   dst.w = outW(g);
@@ -324,28 +386,81 @@ static void probe(const std::string& in) {
   check(uhdr_decode(dec), "decode");
   uhdr_raw_image_t* raw = uhdr_get_decoded_image(dec);
   if (!raw) die("decoded image missing");
+
+  auto* hdrDec = uhdr_create_decoder();
+  if (!hdrDec) die("HDR decoder allocation failed");
+  check(uhdr_dec_set_image(hdrDec, &img), "set HDR image");
+  check(uhdr_dec_set_out_img_format(hdrDec, UHDR_IMG_FMT_32bppRGBA1010102), "set HDR format");
+  check(uhdr_dec_set_out_color_transfer(hdrDec, UHDR_CT_HLG), "set HDR transfer");
+  check(uhdr_decode(hdrDec), "decode HDR");
+  uhdr_raw_image_t* hdrRaw = uhdr_get_decoded_image(hdrDec);
+  if (!hdrRaw) die("decoded HDR image missing");
+  const auto* hdrPixels = static_cast<const uint32_t*>(hdrRaw->planes[UHDR_PLANE_PACKED]);
+  unsigned int hdrStride = hdrRaw->stride[UHDR_PLANE_PACKED] ? hdrRaw->stride[UHDR_PLANE_PACKED] : hdrRaw->w;
+  uint32_t hdrMin = 1023;
+  uint32_t hdrMax = 0;
+  size_t hdrHighlights = 0;
+  size_t hdrClipped = 0;
+  for (unsigned int y = 0; y < hdrRaw->h; y++) {
+    for (unsigned int x = 0; x < hdrRaw->w; x++) {
+      uint32_t px = hdrPixels[static_cast<size_t>(y) * hdrStride + x];
+      uint32_t r = px & 0x3ff;
+      uint32_t g = (px >> 10) & 0x3ff;
+      uint32_t b = (px >> 20) & 0x3ff;
+      hdrMin = std::min(hdrMin, std::min(r, std::min(g, b)));
+      hdrMax = std::max(hdrMax, std::max(r, std::max(g, b)));
+      uint32_t peak = std::max(r, std::max(g, b));
+      if (peak >= 768) hdrHighlights++;
+      if (peak == 1023) hdrClipped++;
+    }
+  }
+
   std::cout << "{\"width\":" << w << ",\"height\":" << h << ",\"gainmap_width\":" << gw
             << ",\"gainmap_height\":" << gh << ",\"metadata\":" << (md ? "true" : "false")
-            << ",\"decoded_width\":" << raw->w << ",\"decoded_height\":" << raw->h << "}\n";
+            << ",\"decoded_width\":" << raw->w << ",\"decoded_height\":" << raw->h
+            << ",\"hdr_min\":" << hdrMin << ",\"hdr_max\":" << hdrMax
+            << ",\"hdr_highlights\":" << hdrHighlights << ",\"hdr_clipped\":" << hdrClipped
+            << "}\n";
+  uhdr_release_decoder(hdrDec);
   uhdr_release_decoder(dec);
+}
+
+static std::vector<unsigned char> makeProgressiveBase(const std::vector<unsigned char>& bytes,
+                                                       const std::string& sizeStr,
+                                                       Geometry* geometry = nullptr,
+                                                       RGBImage* rawBase = nullptr) {
+  auto img = comp(const_cast<std::vector<unsigned char>&>(bytes));
+  auto* dec = uhdr_create_decoder();
+  if (!dec) die("base decoder allocation failed");
+  check(uhdr_dec_set_image(dec, &img), "set base image");
+  check(uhdr_dec_probe(dec), "probe base image");
+  Geometry geom = targetGeometry(uhdr_dec_get_image_width(dec), uhdr_dec_get_image_height(dec),
+                                 parseSize(sizeStr));
+  uhdr_mem_block_t* base = uhdr_dec_get_base_image(dec);
+  if (!base) die("base image missing");
+  RGBImage baseRGB = resizeRGB(decodeJpegRGB(base->data, base->data_sz), geom);
+  uhdr_release_decoder(dec);
+  if (geometry) *geometry = geom;
+  std::vector<unsigned char> compressed = encodeProgressiveJpeg(baseRGB);
+  if (rawBase) *rawBase = std::move(baseRGB);
+  return compressed;
+}
+
+static void progressiveBase(const std::string& in, const std::string& out,
+                            const std::string& sizeStr) {
+  auto bytes = readFile(in);
+  if (!is_uhdr_image(bytes.data(), static_cast<int>(bytes.size()))) die("not a valid Ultra HDR image");
+  auto base = makeProgressiveBase(bytes, sizeStr);
+  writeFile(out, base.data(), base.size());
 }
 
 static void resize(const std::string& in, const std::string& out, const std::string& sizeStr) {
   auto bytes = readFile(in);
   if (!is_uhdr_image(bytes.data(), static_cast<int>(bytes.size()))) die("not a valid Ultra HDR image");
   auto img = comp(bytes);
-
-  auto* p = uhdr_create_decoder();
-  if (!p) die("probe decoder allocation failed");
-  check(uhdr_dec_set_image(p, &img), "set image");
-  check(uhdr_dec_probe(p), "probe");
-  int sw = uhdr_dec_get_image_width(p);
-  int sh = uhdr_dec_get_image_height(p);
-  uhdr_mem_block_t* base = uhdr_dec_get_base_image(p);
-  if (!base) die("base image missing");
-  Geometry geom = targetGeometry(sw, sh, parseSize(sizeStr));
-  RGBImage baseRGB = resizeRGB(decodeJpegRGB(base->data, base->data_sz), geom);
-  uhdr_release_decoder(p);
+  Geometry geom;
+  RGBImage baseRGB;
+  std::vector<unsigned char> progressiveBase = makeProgressiveBase(bytes, sizeStr, &geom, &baseRGB);
 
   auto* dec = uhdr_create_decoder();
   if (!dec) die("decoder allocation failed");
@@ -381,8 +496,17 @@ static void resize(const std::string& in, const std::string& out, const std::str
 
   auto* enc = uhdr_create_encoder();
   if (!enc) die("encoder allocation failed");
+  uhdr_compressed_image_t encSdrCompressed = comp(progressiveBase);
+  encSdrCompressed.cg = UHDR_CG_BT_709;
+  encSdrCompressed.ct = UHDR_CT_SRGB;
+  encSdrCompressed.range = UHDR_CR_FULL_RANGE;
+
   check(uhdr_enc_set_raw_image(enc, &encHdr, UHDR_HDR_IMG), "set hdr raw");
   check(uhdr_enc_set_raw_image(enc, &encSdr, UHDR_SDR_IMG), "set sdr raw");
+  // Pinned libultrahdr API-2 computes the gain map from both raw intents and appends it to this
+  // compressed SDR intent without transcoding the primary JPEG.
+  check(uhdr_enc_set_compressed_image(enc, &encSdrCompressed, UHDR_SDR_IMG),
+        "set compressed sdr primary");
   check(uhdr_enc_set_quality(enc, 90, UHDR_BASE_IMG), "set base quality");
   check(uhdr_enc_set_quality(enc, 90, UHDR_GAIN_MAP_IMG), "set gainmap quality");
   check(uhdr_enc_set_output_format(enc, UHDR_CODEC_JPG), "set output format");
@@ -395,10 +519,15 @@ static void resize(const std::string& in, const std::string& out, const std::str
 }
 
 int main(int argc, char** argv) {
-  if (argc < 3) die("usage: hdrthumb-helper probe <in> | resize <in> <out> <size>");
+  if (argc < 3)
+    die("usage: hdrthumb-helper probe <in> | progressive-base <in> <out> <size> | resize <in> <out> <size>");
   std::string cmd = argv[1];
   if (cmd == "probe" && argc == 3) {
     probe(argv[2]);
+    return 0;
+  }
+  if (cmd == "progressive-base" && argc == 5) {
+    progressiveBase(argv[2], argv[3], argv[4]);
     return 0;
   }
   if (cmd == "resize" && argc == 5) {

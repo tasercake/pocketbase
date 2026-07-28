@@ -4,7 +4,9 @@ package hdrthumb
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/jpeg"
 	"math"
@@ -12,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/disintegration/imaging"
 )
@@ -24,6 +27,10 @@ type helperProbeResult struct {
 	Metadata      bool `json:"metadata"`
 	DecodedWidth  int  `json:"decoded_width"`
 	DecodedHeight int  `json:"decoded_height"`
+	HDRMin        int  `json:"hdr_min"`
+	HDRMax        int  `json:"hdr_max"`
+	HDRHighlights int  `json:"hdr_highlights"`
+	HDRClipped    int  `json:"hdr_clipped"`
 }
 
 func TestUltraHDRBackendCreatesLibUltraHDRThumbnail(t *testing.T) {
@@ -42,6 +49,24 @@ func TestUltraHDRBackendCreatesLibUltraHDRThumbnail(t *testing.T) {
 	if len(result.Bytes) == 0 {
 		t.Fatal("expected thumbnail bytes")
 	}
+	primary, err := InspectPrimaryJPEG(result.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primary.FirstSOF != 0xc2 || primary.SOSCount < 2 || !primary.HasValidICC || !primary.Is420 {
+		t.Fatalf("unexpected progressive primary: %+v", primary)
+	}
+	gainOffset := bytes.Index(result.Bytes[primary.End:], []byte{0xff, 0xd8})
+	if gainOffset < 0 {
+		t.Fatal("gain-map JPEG codestream missing")
+	}
+	gainMap, err := InspectPrimaryJPEG(result.Bytes[primary.End+gainOffset:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gainMap.FirstSOF != 0xc0 || gainMap.SOSCount != 1 {
+		t.Fatalf("gain-map JPEG must remain baseline: %+v", gainMap)
+	}
 
 	probe := probeWithLibUltraHDR(t, result.Bytes)
 	if probe.Width != 320 || probe.Height == 0 {
@@ -52,6 +77,21 @@ func TestUltraHDRBackendCreatesLibUltraHDRThumbnail(t *testing.T) {
 	}
 	if !probe.Metadata || probe.GainmapWidth != probe.Width || probe.GainmapHeight != probe.Height {
 		t.Fatalf("unexpected gain-map metadata/dimensions: %+v", probe)
+	}
+	if probe.HDRMax < 768 || probe.HDRHighlights == 0 || probe.HDRMax-probe.HDRMin < 256 {
+		t.Fatalf("full HDR decode lacks nontrivial highlights: %+v", probe)
+	}
+	if probe.HDRClipped*20 > probe.Width*probe.Height {
+		t.Fatalf("more than 5%% of full HDR decode is clipped: %+v", probe)
+	}
+	for _, marker := range [][]byte{
+		[]byte("MPF\x00"),
+		[]byte("http://ns.adobe.com/xap/1.0/\x00"),
+		[]byte("urn:iso:std:iso:ts:21496:-1"),
+	} {
+		if !bytes.Contains(result.Bytes, marker) {
+			t.Fatalf("Ultra HDR output missing metadata marker %q", marker)
+		}
 	}
 
 	cfg, err := jpeg.DecodeConfig(bytes.NewReader(result.Bytes))
@@ -68,6 +108,123 @@ func TestUltraHDRBackendCreatesLibUltraHDRThumbnail(t *testing.T) {
 	}
 	if img.Bounds().Dx() != cfg.Width || img.Bounds().Dy() != cfg.Height {
 		t.Fatalf("decode/config dimensions differ: decode=%v config=%dx%d", img.Bounds(), cfg.Width, cfg.Height)
+	}
+}
+
+func TestUltraHDRBackendCancellationTerminatesNativeHelper(t *testing.T) {
+	input, err := os.ReadFile("../../tests/data/hdr/current-photo-1.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = CreateContext(ctx, input, Options{Size: "2000x0", OriginalName: "current-photo-1.jpg", OriginalContentType: "image/jpeg"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled helper error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestPinnedLibUltraHDRPreservesProgressiveCompressedPrimary(t *testing.T) {
+	input, err := os.ReadFile("../../tests/data/hdr/current-photo-1.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Create(input, Options{Size: "320x0", OriginalName: "current-photo-1.jpg", OriginalContentType: "image/jpeg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	helper := helperPath()
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "input.jpg")
+	basePath := filepath.Join(dir, "progressive-base.jpg")
+	if err := os.WriteFile(inPath, input, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(helper, "progressive-base", inPath, basePath, "320x0").CombinedOutput(); err != nil {
+		t.Fatalf("progressive base generation failed: %v: %s", err, output)
+	}
+	base, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pinned API-2 prepends JPEG_R container metadata after SOI, then copies the supplied
+	// compressed primary from byte 2 onward. This proves no primary entropy/tables transcode.
+	if !bytes.Contains(result.Bytes, base[2:]) {
+		t.Fatal("JPEG_R output does not preserve supplied progressive primary bytes")
+	}
+	legacyImage, err := jpeg.Decode(bytes.NewReader(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var baseline bytes.Buffer
+	if err := jpeg.Encode(&baseline, legacyImage, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	if len(base) > baseline.Len()*110/100 {
+		t.Fatalf("progressive primary size %d exceeds baseline quality-90 regression bound %d", len(base), baseline.Len()*110/100)
+	}
+	info, err := InspectPrimaryJPEG(result.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.FirstSOF != 0xc2 || info.SOSCount < 2 || !info.HasValidICC || !info.Is420 {
+		t.Fatalf("preserved primary properties = %+v", info)
+	}
+}
+
+func TestUltraHDRBackendAllFixturesProgressiveFullDecode(t *testing.T) {
+	for _, name := range []string{"current-photo-1.jpg", "current-photo-2.jpg", "current-photo-3.jpg"} {
+		t.Run(name, func(t *testing.T) {
+			input, err := os.ReadFile(filepath.Join("../../tests/data/hdr", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := Create(input, Options{Size: "160x0", OriginalName: name, OriginalContentType: "image/jpeg"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := ValidateProgressiveUltraHDR(result.Bytes, "image/jpeg")
+			if err != nil {
+				t.Fatal(err)
+			}
+			probe, err := Probe(result.Bytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Width != 160 || !info.HasValidICC || !info.Is420 || probe.GainmapWidth != info.Width || probe.GainmapHeight != info.Height || probe.HDRHighlights == 0 {
+				t.Fatalf("progressive/full-decode properties: info=%+v probe=%+v", info, probe)
+			}
+		})
+	}
+}
+
+func TestUltraHDRBackendGalleryDimensions(t *testing.T) {
+	input, err := os.ReadFile("../../tests/data/hdr/current-photo-1.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for size, want := range map[string][2]int{
+		"400x0":  {400, 533},
+		"1200x0": {1200, 1600},
+		"2000x0": {2000, 2667},
+	} {
+		t.Run(size, func(t *testing.T) {
+			result, err := Create(input, Options{Size: size, OriginalName: "current-photo-1.jpg", OriginalContentType: "image/jpeg"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := ValidateProgressiveUltraHDR(result.Bytes, "image/jpeg")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !info.HasValidICC || !info.Is420 || info.Width != want[0] || info.Height != want[1] {
+				t.Fatalf("primary properties = %+v, want dimensions %dx%d, ICC, and 4:2:0", info, want[0], want[1])
+			}
+			if len(result.Bytes) > info.Width*info.Height*2 {
+				t.Fatalf("thumbnail size %d exceeds 2 bytes/pixel regression bound", len(result.Bytes))
+			}
+		})
 	}
 }
 
