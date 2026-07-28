@@ -168,6 +168,7 @@ func (pb *PocketBase) Start() error {
 	pb.RootCmd.AddCommand(cmd.NewSuperuserCommand(pb))
 	pb.RootCmd.AddCommand(cmd.NewServeCommand(pb, !pb.hideStartBanner))
 	pb.RootCmd.AddCommand(cmd.NewBlurhashCommand(pb))
+	pb.RootCmd.AddCommand(cmd.NewGalleryThumbCommand(pb))
 
 	return pb.Execute()
 }

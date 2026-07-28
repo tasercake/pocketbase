@@ -1,10 +1,12 @@
 package apis
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
@@ -165,15 +167,58 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 				thumbDirName = "thumbs_hdr_" + filename
 			}
 			event.ServedPath = baseFilesPath + "/" + thumbDirName + "/" + event.ServedName
+			isVersionedGalleryThumb := false
+			isGalleryThumb := isPublishedPhotoRecord(record) && hdrRequired && isHDRSource && isGalleryHDRThumbSize(selectedThumbSize)
+			if isGalleryThumb {
+				_, ready := api.thumbs.cachedGalleryURLs(record)
+				if !ready {
+					ready, err = galleryRecordVariantsReady(e.Request.Context(), fsys, record)
+					if err != nil {
+						return e.InternalServerError("Failed to resolve gallery thumbnail generation.", err)
+					}
+					if ready {
+						api.thumbs.storeGalleryReady(record)
+					}
+				}
+				if ready {
+					event.ServedPath = galleryHDRThumbPath(baseFilesPath, filename, selectedThumbSize)
+					isVersionedGalleryThumb = true
+				} else {
+					event.ServedPath = legacyGalleryHDRThumbPath(baseFilesPath, filename, selectedThumbSize)
+				}
+			}
 
-			// create a new thumb if it doesn't exist
-			if exists, _ := fsys.Exists(event.ServedPath); !exists {
-				thumbErr := api.createThumb(e, fsys, originalPath, event.ServedPath, filesystem.ThumbOptions{
+			// Create missing variants. Versioned gallery objects must also satisfy the
+			// same metadata/container validation used by direct CDN URL exposure.
+			exists, _ := fsys.Exists(event.ServedPath)
+			if exists && isVersionedGalleryThumb {
+				attrs, attrsErr := fsys.Attributes(event.ServedPath)
+				if attrsErr != nil {
+					return e.InternalServerError("Failed to inspect immutable gallery thumbnail.", attrsErr)
+				}
+				if err := validateGalleryHDRThumb(e.Request.Context(), fsys, event.ServedPath, selectedThumbSize, attrs); err != nil {
+					return e.InternalServerError("Immutable gallery thumbnail is invalid; a new generation is required.", err)
+				}
+			}
+			if !exists {
+				opts := filesystem.ThumbOptions{
 					Size:              selectedThumbSize,
 					HdrEnabled:        effectiveFileField.HdrThumbs,
 					HdrPolicy:         effectiveFileField.HdrThumbsPolicy,
 					SourceContentType: oAttrs.ContentType,
-				})
+				}
+				if isVersionedGalleryThumb {
+					opts.CacheControl = galleryHDRThumbCacheControl
+					opts.Context = e.Request.Context()
+					opts.Immutable = true
+					opts.Validate = func(validateCtx context.Context, data []byte) error {
+						return validateGalleryHDRThumbBytes(validateCtx, data, selectedThumbSize)
+					}
+					opts.Metadata = map[string]string{
+						galleryHDRThumbGenerationMetadata: galleryHDRThumbGenerationVersion,
+					}
+				}
+				thumbErr := api.createThumb(e, fsys, originalPath, event.ServedPath, opts)
 				if thumbErr != nil {
 					if hdrRequired && isHDRSource && isHDRThumbError(thumbErr) {
 						return e.BadRequestError("HDR thumbnail generation required but unavailable.", thumbErr)
@@ -197,6 +242,10 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 
 	if thumbSize != "" && event.ThumbError == nil && event.ServedPath == originalPath {
 		event.ThumbError = fmt.Errorf("the thumb size %q or the original file format are not supported", thumbSize)
+	}
+
+	if strings.Contains(event.ServedPath, "/"+galleryHDRThumbGenerationVersion+"/") {
+		e.Response.Header().Set("Cache-Control", galleryHDRThumbCacheControl)
 	}
 
 	// clickjacking shouldn't be a concern when serving uploaded files,

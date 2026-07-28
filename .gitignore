@@ -3,6 +3,9 @@
 
 .DS_Store
 
+# local native dependency/build bundles
+/.deps/
+
 # goreleaser builds folder
 /.builds/
 

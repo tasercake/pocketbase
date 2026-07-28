@@ -18,10 +18,15 @@ git -C "$SRC_DIR" checkout --detach "$LIBULTRAHDR_REF"
 
 git -C "$SRC_DIR" submodule update --init --recursive
 
+# Pinned v1.4.0 relies on transitive <cstdint> includes that GCC 15 no longer provides.
+# Emit both metadata profiles for legacy XMP and ISO 21496-1 interoperability.
 cmake -S "$SRC_DIR" -B "$BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_FLAGS="${CXXFLAGS:-} -include cstdint" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-  -DBUILD_SHARED_LIBS=OFF
+  -DBUILD_SHARED_LIBS=OFF \
+  -DUHDR_WRITE_XMP=TRUE \
+  -DUHDR_WRITE_ISO=TRUE
 cmake --build "$BUILD_DIR"
 cmake --install "$BUILD_DIR"
 

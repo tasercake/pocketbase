@@ -59,3 +59,18 @@ type Result struct {
 	Evidence    []string
 }
 
+// ProbeResult is returned only after libultrahdr parses metadata and fully
+// decodes both the legacy and HDR renditions.
+type ProbeResult struct {
+	Width         int  `json:"width"`
+	Height        int  `json:"height"`
+	GainmapWidth  int  `json:"gainmap_width"`
+	GainmapHeight int  `json:"gainmap_height"`
+	DecodedWidth  int  `json:"decoded_width"`
+	DecodedHeight int  `json:"decoded_height"`
+	HDRMin        int  `json:"hdr_min"`
+	HDRMax        int  `json:"hdr_max"`
+	HDRHighlights int  `json:"hdr_highlights"`
+	HDRClipped    int  `json:"hdr_clipped"`
+	Metadata      bool `json:"metadata"`
+}

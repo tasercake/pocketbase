@@ -2,18 +2,25 @@ package apis
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
 	"github.com/pocketbase/pocketbase/tools/hdrthumb"
+	"github.com/pocketbase/pocketbase/tools/router"
 )
 
 func TestGalleryMediaURLEscapesPathSegments(t *testing.T) {
@@ -21,6 +28,86 @@ func TestGalleryMediaURLEscapesPathSegments(t *testing.T) {
 	want := "https://media-cdn.penukonda.me/photos/rec%201/thumbs_hdr_a/b.jpg/400x0_a%20b.jpg"
 	if got != want {
 		t.Fatalf("galleryMediaURL() = %q, want %q", got, want)
+	}
+}
+
+func TestAttachGalleryURLsDoesNotSynchronouslyGenerateMissingCollection(t *testing.T) {
+	app := core.NewBaseApp(core.BaseAppConfig{DataDir: t.TempDir()})
+	if err := app.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	defer app.ResetBootstrapState()
+
+	collection := core.NewBaseCollection("photos")
+	collection.Fields.Add(
+		&core.BoolField{Name: "published"},
+		&core.FileField{Name: "image", MaxSelect: 1},
+	)
+	if err := app.Save(collection); err != nil {
+		t.Fatal(err)
+	}
+	file, err := filesystem.NewFileFromBytes(smallJPEG(t), "photo.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := core.NewRecord(collection)
+	record.Set("published", true)
+	record.Set("image", file)
+	if err := app.Save(record); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := attachGalleryPhotoURLs(&core.RequestEvent{App: app, Event: router.Event{Request: httptest.NewRequest("GET", "/", nil)}}, record); err != nil {
+		t.Fatal(err)
+	}
+	urls, ok := record.Get("urls").(map[string]string)
+	if !ok || len(urls) != len(galleryHDRThumbSizes) {
+		t.Fatalf("legacy fallback URLs = %#v", record.Get("urls"))
+	}
+	if bytes.Contains([]byte(urls["thumb400"]), []byte("/"+galleryHDRThumbGenerationVersion+"/")) {
+		t.Fatalf("missing generation was exposed: %q", urls["thumb400"])
+	}
+	fsys, err := app.NewFilesystem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+	for _, size := range galleryHDRThumbSizes {
+		exists, err := fsys.Exists(galleryHDRThumbPath(record.BaseFilesPath(), record.GetString("image"), size))
+		if err != nil || exists {
+			t.Fatalf("request generated %s synchronously: exists=%v err=%v", size, exists, err)
+		}
+	}
+}
+
+func TestExposeMaterializedGalleryPhotoRequiresUnpublishedState(t *testing.T) {
+	app := core.NewBaseApp(core.BaseAppConfig{DataDir: t.TempDir()})
+	if err := app.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	defer app.ResetBootstrapState()
+	collection := core.NewBaseCollection("photos")
+	collection.Fields.Add(&core.BoolField{Name: "published"}, &core.FileField{Name: "image", MaxSelect: 1})
+	if err := app.Save(collection); err != nil {
+		t.Fatal(err)
+	}
+	record := core.NewRecord(collection)
+	record.Set("published", false)
+	if err := app.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := exposeMaterializedGalleryPhoto(app, record); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := app.FindRecordById(collection, record.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !persisted.GetBool("published") {
+		t.Fatal("materialized record remained unpublished")
+	}
+	if err := exposeMaterializedGalleryPhoto(app, record); err == nil {
+		t.Fatal("already-published record was exposed twice")
 	}
 }
 
@@ -64,7 +151,7 @@ func TestGalleryMaterializerRejectsSDRSource(t *testing.T) {
 	}
 }
 
-func TestGalleryMaterializerReturnsExistingHDRThumbURLs(t *testing.T) {
+func TestGalleryMaterializerRejectsOldBaselineObjectsAtNewGenerationPaths(t *testing.T) {
 	fsys, cleanup := newLocalTestFS(t)
 	defer cleanup()
 
@@ -73,10 +160,6 @@ func TestGalleryMaterializerReturnsExistingHDRThumbURLs(t *testing.T) {
 	if err != nil {
 		t.Skipf("HDR fixture unavailable: %v", err)
 	}
-
-	// Intentionally upload only the thumbnails, not the original source. The
-	// already-materialized cold path should verify the thumbnail bytes themselves
-	// and avoid full original-file HDR detection before returning URLs.
 	for _, size := range galleryHDRThumbSizes {
 		if err := fsys.Upload(data, galleryHDRThumbPath(record.BaseFilesPath(), "current photo.jpg", size)); err != nil {
 			t.Fatal(err)
@@ -84,49 +167,20 @@ func TestGalleryMaterializerReturnsExistingHDRThumbURLs(t *testing.T) {
 	}
 
 	materializer := newThumbMaterializerFromEnv()
-	urls, err := materializer.materializeGalleryRecord(nil, fsys, record)
-	if err != nil {
-		t.Fatal(err)
+	urls, err := materializer.materializeGalleryRecord(context.Background(), fsys, record)
+	if err == nil {
+		t.Fatalf("expected old baseline generation rejection, got urls %#v", urls)
 	}
-	if len(urls) != 3 {
-		t.Fatalf("expected 3 urls, got %#v", urls)
-	}
-	for _, key := range []string{"thumb400", "thumb1200", "thumb2000"} {
-		if urls[key] == "" {
-			t.Fatalf("missing %s in %#v", key, urls)
-		}
-		if !bytes.HasPrefix([]byte(urls[key]), []byte(galleryMediaCDNBaseURL+"/photos_collection/record1/")) {
-			t.Fatalf("unexpected %s url shape: %q", key, urls[key])
-		}
-		if bytes.Contains([]byte(urls[key]), []byte(" ")) {
-			t.Fatalf("url was not escaped: %q", urls[key])
-		}
-	}
-	if _, ok := materializer.cachedGalleryURLs(record); !ok {
-		t.Fatalf("expected existing verified HDR thumbs to populate readiness cache")
+	if _, ok := materializer.cachedGalleryURLs(record); ok {
+		t.Fatal("old baseline objects populated new-generation readiness cache")
 	}
 }
 
 func TestGalleryMaterializerCacheHitAvoidsFilesystem(t *testing.T) {
-	fsys, cleanup := newLocalTestFS(t)
-	defer cleanup()
-
 	record := newGalleryTestRecord(true, "cached photo.jpg")
-	data, err := os.ReadFile(filepath.Join("..", "tests", "data", "hdr", "current-photo-1.jpg"))
-	if err != nil {
-		t.Skipf("HDR fixture unavailable: %v", err)
-	}
-	for _, size := range galleryHDRThumbSizes {
-		if err := fsys.Upload(data, galleryHDRThumbPath(record.BaseFilesPath(), "cached photo.jpg", size)); err != nil {
-			t.Fatal(err)
-		}
-	}
-
 	materializer := newThumbMaterializerFromEnv()
-	want, err := materializer.materializeGalleryRecord(nil, fsys, record)
-	if err != nil {
-		t.Fatal(err)
-	}
+	materializer.storeGalleryReady(record)
+	want := makeGalleryURLs(record.BaseFilesPath(), "cached photo.jpg")
 
 	got, err := materializer.materializeGalleryRecord(nil, nil, record)
 	if err != nil {
@@ -134,6 +188,31 @@ func TestGalleryMaterializerCacheHitAvoidsFilesystem(t *testing.T) {
 	}
 	if len(got) != len(want) || got["thumb400"] != want["thumb400"] || got["thumb1200"] != want["thumb1200"] || got["thumb2000"] != want["thumb2000"] {
 		t.Fatalf("cache hit urls = %#v, want %#v", got, want)
+	}
+}
+
+func TestGalleryGenerationPathsCacheAndRollbackRetention(t *testing.T) {
+	record := newGalleryTestRecord(true, "photo name.jpg")
+	path := galleryHDRThumbPath(record.BaseFilesPath(), "photo name.jpg", "400x0")
+	legacy := legacyGalleryHDRThumbPath(record.BaseFilesPath(), "photo name.jpg", "400x0")
+	if path == legacy || !bytes.Contains([]byte(path), []byte("/"+galleryHDRThumbGenerationVersion+"/")) {
+		t.Fatalf("versioned path=%q legacy=%q", path, legacy)
+	}
+	urls := makeGalleryURLs(record.BaseFilesPath(), "photo name.jpg")
+	if !bytes.Contains([]byte(urls["thumb400"]), []byte("/"+galleryHDRThumbGenerationVersion+"/")) {
+		t.Fatalf("versioned URL missing generation: %q", urls["thumb400"])
+	}
+	if bytes.Contains([]byte(urls["thumb400"]), []byte(" ")) {
+		t.Fatalf("versioned URL was not escaped: %q", urls["thumb400"])
+	}
+	readyPath := galleryHDRReadyPath(record.BaseFilesPath(), "photo name.jpg")
+	if !bytes.Contains([]byte(readyPath), []byte("/"+galleryHDRThumbGenerationVersion+"/_ready")) ||
+		!bytes.Contains(galleryHDRReadyManifest(), []byte(galleryHDRThumbGenerationVersion)) {
+		t.Fatalf("readiness path=%q manifest=%q", readyPath, galleryHDRReadyManifest())
+	}
+	key := galleryReadinessCacheKey(record, "photo name.jpg")
+	if !bytes.Contains([]byte(key), []byte(galleryHDRThumbGenerationVersion)) {
+		t.Fatalf("readiness key missing generation: %q", key)
 	}
 }
 
@@ -179,7 +258,7 @@ func TestGalleryMaterializerCacheConcurrentHits(t *testing.T) {
 	wg.Wait()
 }
 
-func TestGalleryMaterializerExistingSDRThumbsDoNotBypassHDRSourceValidation(t *testing.T) {
+func TestGalleryMaterializerDoesNotOverwriteInvalidImmutableObjects(t *testing.T) {
 	fsys, cleanup := newLocalTestFS(t)
 	defer cleanup()
 
@@ -199,12 +278,148 @@ func TestGalleryMaterializerExistingSDRThumbsDoNotBypassHDRSourceValidation(t *t
 	if err == nil {
 		t.Fatalf("expected HDR-required error, got urls %#v", urls)
 	}
-	if !errors.Is(err, hdrthumb.ErrHDRRequired) {
-		t.Fatalf("expected ErrHDRRequired, got %v", err)
+	if !strings.Contains(err.Error(), "bump generation instead of overwriting") {
+		t.Fatalf("expected immutable generation error, got %v", err)
 	}
 	if _, ok := materializer.cachedGalleryURLs(record); ok {
 		t.Fatalf("expected invalid existing thumbs not to populate readiness cache")
 	}
+}
+
+func TestGalleryBackfillEnumeratesPublishedPhotosAndReportsRetryableFailure(t *testing.T) {
+	app := core.NewBaseApp(core.BaseAppConfig{DataDir: t.TempDir()})
+	if err := app.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	defer app.ResetBootstrapState()
+	collection := core.NewBaseCollection("photos")
+	collection.Fields.Add(
+		&core.BoolField{Name: "published"},
+		&core.FileField{Name: "image", MaxSelect: 1},
+	)
+	if err := app.Save(collection); err != nil {
+		t.Fatal(err)
+	}
+	file, err := filesystem.NewFileFromBytes(smallJPEG(t), "photo.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := core.NewRecord(collection)
+	record.Set("published", true)
+	record.Set("image", file)
+	if err := app.Save(record); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := BackfillGalleryThumbs(context.Background(), app, 1)
+	if err == nil || stats.Failed != 1 || stats.Generated != 0 {
+		t.Fatalf("SDR backfill stats=%+v err=%v", stats, err)
+	}
+	if !errors.Is(err, hdrthumb.ErrHDRRequired) {
+		t.Fatalf("backfill error = %v, want ErrHDRRequired", err)
+	}
+}
+
+func TestGalleryBackfillBoundedConcurrencyAndIdempotency(t *testing.T) {
+	records := newBackfillTestRecords(12)
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var mu sync.Mutex
+	ready := map[string]bool{}
+	generate := func(ctx context.Context, record *core.Record) (bool, error) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for current > maximum.Load() && !maximum.CompareAndSwap(maximum.Load(), current) {
+		}
+		time.Sleep(5 * time.Millisecond)
+		mu.Lock()
+		defer mu.Unlock()
+		if ready[record.Id] {
+			return false, nil
+		}
+		ready[record.Id] = true
+		return true, nil
+	}
+
+	stats, err := runBoundedGalleryBackfill(context.Background(), records, 3, generate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Generated != len(records) || stats.Skipped != 0 || stats.Failed != 0 {
+		t.Fatalf("first pass stats = %+v", stats)
+	}
+	if got := maximum.Load(); got > 3 || got < 2 {
+		t.Fatalf("maximum concurrency = %d, want 2..3", got)
+	}
+	stats, err = runBoundedGalleryBackfill(context.Background(), records, 3, generate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Generated != 0 || stats.Skipped != len(records) || stats.Failed != 0 {
+		t.Fatalf("idempotent pass stats = %+v", stats)
+	}
+}
+
+func TestGalleryBackfillRetryAfterPartialFailure(t *testing.T) {
+	records := newBackfillTestRecords(5)
+	var mu sync.Mutex
+	ready := map[string]bool{}
+	failedOnce := false
+	generate := func(ctx context.Context, record *core.Record) (bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ready[record.Id] {
+			return false, nil
+		}
+		if record.Id == "record-2" && !failedOnce {
+			failedOnce = true
+			return false, errors.New("injected interruption")
+		}
+		ready[record.Id] = true
+		return true, nil
+	}
+
+	first, err := runBoundedGalleryBackfill(context.Background(), records, 2, generate)
+	if err == nil || first.Failed != 1 || first.Generated != 4 {
+		t.Fatalf("partial pass stats=%+v err=%v", first, err)
+	}
+	second, err := runBoundedGalleryBackfill(context.Background(), records, 2, generate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generated != 1 || second.Skipped != 4 || second.Failed != 0 {
+		t.Fatalf("retry stats = %+v", second)
+	}
+}
+
+func TestGalleryBackfillCancellationIsRetryable(t *testing.T) {
+	records := newBackfillTestRecords(20)
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls atomic.Int32
+	generate := func(ctx context.Context, record *core.Record) (bool, error) {
+		if calls.Add(1) == 1 {
+			cancel()
+		}
+		return true, nil
+	}
+	_, err := runBoundedGalleryBackfill(ctx, records, 1, generate)
+	if err == nil {
+		t.Fatal("cancelled backfill unexpectedly succeeded")
+	}
+	stats, err := runBoundedGalleryBackfill(context.Background(), records, 2,
+		func(context.Context, *core.Record) (bool, error) { return true, nil })
+	if err != nil || stats.Generated != len(records) {
+		t.Fatalf("retry after cancellation stats=%+v err=%v", stats, err)
+	}
+}
+
+func newBackfillTestRecords(count int) []*core.Record {
+	records := make([]*core.Record, count)
+	for i := range records {
+		records[i] = newGalleryTestRecord(true, "photo.jpg")
+		records[i].Id = fmt.Sprintf("record-%d", i)
+	}
+	return records
 }
 
 func newGalleryTestRecord(published bool, filename string) *core.Record {

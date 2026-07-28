@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"image"
@@ -509,6 +510,11 @@ type ThumbOptions struct {
 	HdrEnabled        bool
 	HdrPolicy         string
 	SourceContentType string
+	CacheControl      string
+	Metadata          map[string]string
+	Context           context.Context
+	Validate          func(context.Context, []byte) error
+	Immutable         bool
 }
 
 // CreateThumbWithOptions creates a new thumb image for the file at originalKey location.
@@ -552,7 +558,11 @@ func (s *System) CreateThumbWithOptions(originalKey string, thumbKey string, opt
 		}
 
 		if detected.Kind != hdrthumb.KindNone {
-			result, err := hdrthumb.Create(data, hdrthumb.Options{
+			ctx := opts.Context
+			if ctx == nil {
+				ctx = s.ctx
+			}
+			result, err := hdrthumb.CreateContext(ctx, data, hdrthumb.Options{
 				Size:                thumbSize,
 				OriginalName:        path.Base(originalKey),
 				ThumbName:           path.Base(thumbKey),
@@ -562,12 +572,44 @@ func (s *System) CreateThumbWithOptions(originalKey string, thumbKey string, opt
 				return nil, hdrthumb.NewError(errors.Join(hdrthumb.ErrHDRRequired, err), detected.Kind, path.Base(originalKey), thumbSize, err.Error())
 			}
 
+			if opts.Validate != nil {
+				if err := opts.Validate(ctx, result.Bytes); err != nil {
+					return nil, errors.Join(hdrthumb.ErrHDRGenerationFailed, err)
+				}
+			}
+
+			if opts.Immutable {
+				if exists, _ := s.Exists(thumbKey); exists {
+					existing, err := s.GetReader(thumbKey)
+					if err != nil {
+						return nil, err
+					}
+					existingBytes, readErr := io.ReadAll(existing)
+					closeErr := existing.Close()
+					if readErr != nil || closeErr != nil {
+						return nil, errors.Join(readErr, closeErr)
+					}
+					if !bytes.Equal(existingBytes, result.Bytes) {
+						return nil, errors.New("refusing to overwrite immutable thumbnail with different bytes")
+					}
+					return s.Attributes(thumbKey)
+				}
+			}
+
 			contentType := result.ContentType
 			if contentType == "" {
 				contentType = originalContentType
 			}
 
-			w, err := s.bucket.NewWriter(s.ctx, thumbKey, &blob.WriterOptions{ContentType: contentType})
+			writeCtx := opts.Context
+			if writeCtx == nil {
+				writeCtx = s.ctx
+			}
+			w, err := s.bucket.NewWriter(writeCtx, thumbKey, &blob.WriterOptions{
+				ContentType:  contentType,
+				CacheControl: opts.CacheControl,
+				Metadata:     opts.Metadata,
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -619,7 +661,9 @@ func (s *System) CreateThumbWithOptions(originalKey string, thumbKey string, opt
 	}
 
 	writerOpts := &blob.WriterOptions{
-		ContentType: originalContentType,
+		ContentType:  originalContentType,
+		CacheControl: opts.CacheControl,
+		Metadata:     opts.Metadata,
 	}
 
 	var format imaging.Format
@@ -640,7 +684,11 @@ func (s *System) CreateThumbWithOptions(originalKey string, thumbKey string, opt
 	}
 
 	// open a thumb storage writer (aka. prepare for upload)
-	w, err := s.bucket.NewWriter(s.ctx, thumbKey, writerOpts)
+	writeCtx := opts.Context
+	if writeCtx == nil {
+		writeCtx = s.ctx
+	}
+	w, err := s.bucket.NewWriter(writeCtx, thumbKey, writerOpts)
 	if err != nil {
 		return nil, err
 	}
