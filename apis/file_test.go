@@ -2,6 +2,8 @@ package apis_test
 
 import (
 	"bytes"
+	"image"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,7 @@ import (
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
+	"github.com/pocketbase/pocketbase/tools/filesystem"
 	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 	"github.com/pocketbase/pocketbase/tools/types"
 )
@@ -593,6 +596,123 @@ func TestFileDownloadPhotosClosestThumbSelection(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFileDownloadGalleryOriginalsDisabled(t *testing.T) {
+	t.Parallel()
+
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+
+	photos := core.NewBaseCollection("photos")
+	photos.Fields.Add(
+		&core.FileField{Name: "image", Thumbs: []string{"2000x0"}},
+		&core.FileField{Name: "attachment"},
+	)
+	if err := app.Save(photos); err != nil {
+		t.Fatal(err)
+	}
+
+	var original bytes.Buffer
+	if err := jpeg.Encode(&original, image.NewGray(image.Rect(0, 0, 240, 120)), nil); err != nil {
+		t.Fatal(err)
+	}
+	newRecord := func(imageBytes []byte) *core.Record {
+		t.Helper()
+		record := core.NewRecord(photos)
+		for field, data := range map[string][]byte{"image": imageBytes, "attachment": []byte("attachment")} {
+			file, err := filesystem.NewFileFromBytes(data, field+".jpg")
+			if err != nil {
+				t.Fatal(err)
+			}
+			record.Set(field, file)
+		}
+		if err := app.Save(record); err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	photo := newRecord(original.Bytes())
+	nonImage := newRecord([]byte("unsupported file"))
+	broken := newRecord([]byte{0xff, 0xd8, 0xff, 0xdb, 0, 0})
+
+	view := new(core.Collection)
+	view.Type = core.CollectionTypeView
+	view.Name = "gallery_view"
+	view.ViewQuery = "select id, image as picture from photos"
+	if err := app.Save(view); err != nil {
+		t.Fatal(err)
+	}
+
+	router, err := apis.NewRouter(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux, err := router.BuildMux()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fileURL := func(collection string, record *core.Record, field string) string {
+		return "/api/files/" + collection + "/" + record.Id + "/" + record.GetString(field)
+	}
+	photoURL := fileURL(photos.Name, photo, "image")
+	viewURL := fileURL(view.Name, photo, "image")
+	for _, test := range []struct {
+		name   string
+		url    string
+		method string
+		ranges string
+		status int
+	}{
+		{name: "by name", url: photoURL, status: http.StatusNotFound},
+		{name: "by id", url: fileURL(photos.Id, photo, "image"), status: http.StatusNotFound},
+		{name: "HEAD", url: photoURL, method: http.MethodHead, status: http.StatusNotFound},
+		{name: "range", url: photoURL, ranges: "bytes=0-4", status: http.StatusNotFound},
+		{name: "download", url: photoURL + "?download=1", status: http.StatusNotFound},
+		{name: "empty thumb", url: photoURL + "?thumb=", status: http.StatusNotFound},
+		{name: "invalid thumb", url: photoURL + "?thumb=invalid", status: http.StatusNotFound},
+		{name: "nonimage thumb", url: fileURL(photos.Name, nonImage, "image") + "?thumb=100x100", status: http.StatusNotFound},
+		{name: "failed thumb", url: fileURL(photos.Name, broken, "image") + "?thumb=100x100", status: http.StatusNotFound},
+		{name: "view alias", url: viewURL, status: http.StatusNotFound},
+		{name: "view thumb", url: viewURL + "?thumb=100x100", status: http.StatusOK},
+		{name: "gallery thumb", url: photoURL + "?thumb=2000x0", status: http.StatusOK},
+		{name: "other field", url: fileURL(photos.Name, photo, "attachment"), status: http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(test.method, test.url, nil)
+			if test.ranges != "" {
+				request.Header.Set("Range", test.ranges)
+			}
+			mux.ServeHTTP(recorder, request)
+			if recorder.Code != test.status {
+				t.Fatalf("Status = %d, want %d (content type %q)", recorder.Code, test.status, recorder.Header().Get("Content-Type"))
+			}
+			if bytes.Equal(recorder.Body.Bytes(), original.Bytes()) {
+				t.Fatal("Response served original JPEG bytes")
+			}
+		})
+	}
+
+	t.Run("download hook cannot restore original", func(t *testing.T) {
+		app.OnFileDownloadRequest().BindFunc(func(e *core.FileDownloadRequestEvent) error {
+			e.ServedPath = "/" + path.Dir(photo.BaseFilesPath()) + "/./" + photo.Id + "/" + photo.GetString("image")
+			e.Response.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			return e.Next()
+		})
+		res := performFileRequest(t, app, photoURL+"?thumb=2000x0")
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("Status = %d, want 404", res.StatusCode)
+		}
+		if res.Header.Get("Cache-Control") != "" {
+			t.Fatalf("Unexpected cache policy on rejected original: %q", res.Header.Get("Cache-Control"))
+		}
+	})
 }
 
 func TestFileDownloadNonPhotosThumbSelectionExactMatchOnly(t *testing.T) {
