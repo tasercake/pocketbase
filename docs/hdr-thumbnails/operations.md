@@ -83,3 +83,31 @@ Cleanup is a separate, explicit later operation after compatibility validation a
 - Gain-map JPEG remains baseline and `hdrthumb-helper probe` succeeds.
 - MPF, XMP, and ISO 21496 metadata remain present.
 - Original object hash and retained legacy object hashes are unchanged.
+
+## Gallery deep zoom
+
+Deploy the HDR build and its matching native helper together. The pinned build
+allows dimensions up to 16,384 pixels. The tile worker additionally limits the
+base and gain-map planes to 100 megapixels each.
+
+Generate tiles for every existing photo, including drafts:
+
+```sh
+pocketbase gallery-tiles backfill --workers=1 --include-unpublished
+```
+
+Use `--record ID` to process a single photo. Completed sets report as ready on a
+rerun. Unsupported sources keep their existing preview. Failures and active
+leases are reported separately and can be retried. Draft manifests stay hidden.
+
+The server runs the same job for published records every ten minutes with one
+worker. Set `PB_GALLERY_TILES_BACKGROUND=0` on the service to disable the scheduled
+job while running a manual backfill on a memory-constrained host. Restore the
+normal schedule after the backfill. For newly deployed versions, also run
+`gallery-thumbs backfill --workers=1` if existing whole-image variants need repair.
+
+PocketBase writes a matching preview and overlapping tile levels to its existing
+file storage. The version and generation token are included in CDN paths. The
+photo API adds `tiles` only after the complete set uploads and the database
+still references the same source file. Gallery reads query the stored manifest
+and use the existing thumbnail when it is missing.

@@ -139,3 +139,29 @@ func helperPath() string {
 	}
 	return ""
 }
+
+// RenderTilesContext writes a preview and Deep Zoom tile pyramid into outputDir.
+func RenderTilesContext(ctx context.Context, inputPath, outputDir string, hdr bool) (TilePyramid, error) {
+	helper := helperPath()
+	if helper == "" {
+		return TilePyramid{}, ErrHDRBackendUnavailable
+	}
+
+	command := "tiles"
+	if !hdr {
+		command = "tiles-sdr"
+	}
+	output, err := exec.CommandContext(ctx, helper, command, inputPath, outputDir).Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return TilePyramid{}, fmt.Errorf("HDR tile helper: %w: %s", errors.Join(err, ctx.Err()), exit.Stderr)
+		}
+		return TilePyramid{}, fmt.Errorf("HDR tile helper: %w", errors.Join(err, ctx.Err()))
+	}
+	var pyramid TilePyramid
+	if err := json.Unmarshal(output, &pyramid); err != nil {
+		return TilePyramid{}, fmt.Errorf("invalid tile helper metadata: %w", err)
+	}
+	return pyramid, nil
+}

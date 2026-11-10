@@ -1,4 +1,4 @@
-#include "ultrahdr_api.h"
+#include "image_tools.h"
 #include "srgb_icc.h"
 
 #include <cstdio>
@@ -16,12 +16,12 @@
 #include <utility>
 #include <vector>
 
-static void die(const std::string& msg) {
+void die(const std::string& msg) {
   std::cerr << msg << "\n";
   std::exit(1);
 }
 
-static void check(uhdr_error_info_t e, const char* what) {
+void check(uhdr_error_info_t e, const char* what) {
   if (e.error_code != UHDR_CODEC_OK) {
     std::string m = what;
     if (e.has_detail) {
@@ -32,13 +32,13 @@ static void check(uhdr_error_info_t e, const char* what) {
   }
 }
 
-static std::vector<unsigned char> readFile(const std::string& p) {
+std::vector<unsigned char> readFile(const std::string& p) {
   std::ifstream f(p, std::ios::binary);
   if (!f) die("open input failed: " + p);
   return std::vector<unsigned char>((std::istreambuf_iterator<char>(f)), {});
 }
 
-static void writeFile(const std::string& p, const void* data, size_t n) {
+void writeFile(const std::string& p, const void* data, size_t n) {
   std::ofstream f(p, std::ios::binary);
   if (!f) die("open output failed: " + p);
   f.write(static_cast<const char*>(data), n);
@@ -58,12 +58,6 @@ struct Geometry {
   int srcH = 0;
   int resizeW = 0;
   int resizeH = 0;
-};
-
-struct RGBImage {
-  int w = 0;
-  int h = 0;
-  std::vector<unsigned char> px;
 };
 
 struct JpegError {
@@ -178,7 +172,7 @@ static int outH(const Geometry& g) { return g.resizeH; }
 
 static int clampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
-static double sourceCoord(int out, int srcOffset, int srcN, int dstN) {
+double sourceCoord(int out, int srcOffset, int srcN, int dstN) {
   return srcOffset + (static_cast<double>(out) + 0.5) * srcN / dstN - 0.5;
 }
 
@@ -197,7 +191,7 @@ static uint32_t lerp10(uint32_t c00, uint32_t c10, uint32_t c01, uint32_t c11, d
   return static_cast<uint32_t>(clampInt(v, 0, 1023));
 }
 
-static uhdr_compressed_image_t comp(std::vector<unsigned char>& b) {
+uhdr_compressed_image_t comp(std::vector<unsigned char>& b) {
   uhdr_compressed_image_t img{};
   img.data = b.data();
   img.data_sz = b.size();
@@ -208,7 +202,7 @@ static uhdr_compressed_image_t comp(std::vector<unsigned char>& b) {
   return img;
 }
 
-static RGBImage decodeJpegRGB(const void* data, size_t size) {
+RGBImage decodeJpegRGB(const void* data, size_t size, size_t maxPixels) {
   jpeg_decompress_struct cinfo{};
   JpegError err{};
   cinfo.err = jpeg_std_error(&err.pub);
@@ -221,10 +215,16 @@ static RGBImage decodeJpegRGB(const void* data, size_t size) {
   jpeg_create_decompress(&cinfo);
   jpeg_mem_src(&cinfo, static_cast<const unsigned char*>(data), size);
   jpeg_read_header(&cinfo, TRUE);
+  if (maxPixels && (cinfo.image_width > 16384 || cinfo.image_height > 16384 ||
+                   static_cast<size_t>(cinfo.image_width) * cinfo.image_height > maxPixels)) {
+    jpeg_destroy_decompress(&cinfo);
+    die("tile source exceeds dimension or pixel budget");
+  }
   cinfo.out_color_space = JCS_RGB;
   jpeg_start_decompress(&cinfo);
 
   RGBImage img;
+  img.grayscale = cinfo.jpeg_color_space == JCS_GRAYSCALE;
   img.w = static_cast<int>(cinfo.output_width);
   img.h = static_cast<int>(cinfo.output_height);
   img.px.resize(static_cast<size_t>(img.w) * img.h * 3);
@@ -238,7 +238,7 @@ static RGBImage decodeJpegRGB(const void* data, size_t size) {
   return img;
 }
 
-static std::vector<unsigned char> encodeProgressiveJpeg(const RGBImage& img) {
+std::vector<unsigned char> encodeJpeg(const RGBImage& img, bool progressive) {
   jpeg_compress_struct cinfo{};
   JpegError err{};
   cinfo.err = jpeg_std_error(&err.pub);
@@ -255,19 +255,20 @@ static std::vector<unsigned char> encodeProgressiveJpeg(const RGBImage& img) {
   jpeg_mem_dest(&cinfo, &output, &outputSize);
   cinfo.image_width = img.w;
   cinfo.image_height = img.h;
-  cinfo.input_components = 3;
-  cinfo.in_color_space = JCS_RGB;
+  const bool grayscale = !progressive && img.grayscale;
+  cinfo.input_components = grayscale ? 1 : 3;
+  cinfo.in_color_space = grayscale ? JCS_GRAYSCALE : JCS_RGB;
   jpeg_set_defaults(&cinfo);
   jpeg_set_quality(&cinfo, 90, TRUE);
 
-  // Explicit 4:2:0, independent of libjpeg implementation defaults.
-  cinfo.comp_info[0].h_samp_factor = 2;
-  cinfo.comp_info[0].v_samp_factor = 2;
-  cinfo.comp_info[1].h_samp_factor = 1;
-  cinfo.comp_info[1].v_samp_factor = 1;
-  cinfo.comp_info[2].h_samp_factor = 1;
-  cinfo.comp_info[2].v_samp_factor = 1;
-  jpeg_simple_progression(&cinfo);
+  // Keep the existing thumbnail format. Tiles use 4:4:4 for shared block edges.
+  if (!grayscale) {
+    cinfo.comp_info[0].h_samp_factor = progressive ? 2 : 1;
+    cinfo.comp_info[0].v_samp_factor = progressive ? 2 : 1;
+    cinfo.comp_info[1].h_samp_factor = cinfo.comp_info[1].v_samp_factor = 1;
+    cinfo.comp_info[2].h_samp_factor = cinfo.comp_info[2].v_samp_factor = 1;
+  }
+  if (progressive) jpeg_simple_progression(&cinfo);
   cinfo.optimize_coding = TRUE;
   jpeg_start_compress(&cinfo, TRUE);
 
@@ -275,7 +276,7 @@ static std::vector<unsigned char> encodeProgressiveJpeg(const RGBImage& img) {
   constexpr size_t kICCHeaderSize = 14;
   constexpr size_t kMaxICCChunk = 65533 - kICCHeaderSize;
   const int segmentCount = static_cast<int>((kSRGBICC_len + kMaxICCChunk - 1) / kMaxICCChunk);
-  for (int segment = 0; segment < segmentCount; segment++) {
+  for (int segment = 0; progressive && segment < segmentCount; segment++) {
     const size_t offset = static_cast<size_t>(segment) * kMaxICCChunk;
     const size_t chunk = std::min(kMaxICCChunk, static_cast<size_t>(kSRGBICC_len) - offset);
     std::vector<unsigned char> marker(kICCHeaderSize + chunk);
@@ -286,9 +287,14 @@ static std::vector<unsigned char> encodeProgressiveJpeg(const RGBImage& img) {
     jpeg_write_marker(&cinfo, JPEG_APP0 + 2, marker.data(), marker.size());
   }
 
+  std::vector<unsigned char> grayRow(grayscale ? img.w : 0);
   while (cinfo.next_scanline < cinfo.image_height) {
     JSAMPROW row = const_cast<JSAMPROW>(
         &img.px[static_cast<size_t>(cinfo.next_scanline) * img.w * 3]);
+    if (grayscale) {
+      for (int x = 0; x < img.w; x++) grayRow[x] = row[x * 3];
+      row = grayRow.data();
+    }
     jpeg_write_scanlines(&cinfo, &row, 1);
   }
   jpeg_finish_compress(&cinfo);
@@ -441,7 +447,7 @@ static std::vector<unsigned char> makeProgressiveBase(const std::vector<unsigned
   RGBImage baseRGB = resizeRGB(decodeJpegRGB(base->data, base->data_sz), geom);
   uhdr_release_decoder(dec);
   if (geometry) *geometry = geom;
-  std::vector<unsigned char> compressed = encodeProgressiveJpeg(baseRGB);
+  std::vector<unsigned char> compressed = encodeJpeg(baseRGB, true);
   if (rawBase) *rawBase = std::move(baseRGB);
   return compressed;
 }
@@ -520,7 +526,7 @@ static void resize(const std::string& in, const std::string& out, const std::str
 
 int main(int argc, char** argv) {
   if (argc < 3)
-    die("usage: hdrthumb-helper probe <in> | progressive-base <in> <out> <size> | resize <in> <out> <size>");
+    die("usage: hdrthumb-helper probe <in> | progressive-base <in> <out> <size> | resize <in> <out> <size> | tiles <in> <dir> | tiles-sdr <in> <dir>");
   std::string cmd = argv[1];
   if (cmd == "probe" && argc == 3) {
     probe(argv[2]);
@@ -532,6 +538,10 @@ int main(int argc, char** argv) {
   }
   if (cmd == "resize" && argc == 5) {
     resize(argv[2], argv[3], argv[4]);
+    return 0;
+  }
+  if ((cmd == "tiles" || cmd == "tiles-sdr") && argc == 4) {
+    generateTiles(argv[2], argv[3], cmd == "tiles");
     return 0;
   }
   die("bad arguments");
