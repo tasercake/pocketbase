@@ -1,3 +1,4 @@
+import { getRecordFilePreviewURL } from "../../records/recordFileThumb.js";
 import { filesToDeleteProp } from "./onrecordsave.js";
 
 // {
@@ -151,10 +152,7 @@ export function input(props) {
                                         type: "button",
                                         ariaDescription: app.attrs.tooltip("Open in new tab"),
                                         onclick: async () => {
-                                            const token = await app.getFileToken(props.record.collectionId);
-                                            const url = app.pb.files.getURL(props.record, nameOrFile, {
-                                                token,
-                                            });
+                                            const url = await getRecordFilePreviewURL(props.record, nameOrFile);
                                             window.open(url, "_blank", "noreferrer,noopener");
                                         },
                                     },

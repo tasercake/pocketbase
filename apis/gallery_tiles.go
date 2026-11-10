@@ -304,7 +304,7 @@ func materializeGalleryTiles(ctx context.Context, app core.App, record *core.Rec
 	if err := os.WriteFile(input, source, 0600); err != nil {
 		return false, err
 	}
-	pyramid, err := hdrthumb.RenderTilesContext(ctx, input, dir, hdr)
+	pyramid, err := sharedThumbMaterializer.renderTiles(ctx, input, dir, hdr)
 	if err != nil {
 		return false, err
 	}

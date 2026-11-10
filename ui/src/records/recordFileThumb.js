@@ -36,6 +36,15 @@ function semaphoreProcess() {
     }
 }
 
+export async function getRecordFilePreviewURL(record, filename) {
+    const token = await app.getFileToken(record.collectionId);
+    const options = { token };
+    if (record.collectionName === "photos" && app.utils.toArray(record.image).includes(filename)) {
+        options.thumb = "2000x0";
+    }
+    return app.pb.files.getURL(record, filename, options);
+}
+
 /**
  * Creates a record file thumb element.
  *
@@ -88,10 +97,7 @@ window.app.components.recordFileThumb = function(propsArg = {}) {
             onclick: async (e) => {
                 e.stopPropagation();
 
-                async function resolveURL() {
-                    const token = await app.getFileToken(props.record.collectionId);
-                    return app.pb.files.getURL(props.record, props.filename, { token });
-                }
+                const resolveURL = () => getRecordFilePreviewURL(props.record, props.filename);
 
                 if (data.hasPreview) {
                     app.modals.openFilePreview(resolveURL);

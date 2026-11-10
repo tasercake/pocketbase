@@ -26,7 +26,7 @@ sudo systemctl start pocketbase
 4. Run the versioned gallery backfill after the new binary and helper are available:
 
 ```sh
-pocketbase gallery-thumbs backfill --workers=4
+pocketbase gallery-thumbs backfill --workers=1
 ```
 
 The backfill is idempotent. It processes published photos with bounded concurrency, resumes missing or invalid variants on retry, and never deletes an older generation.
@@ -76,7 +76,7 @@ Cleanup is a separate, explicit later operation after compatibility validation a
 
 - PocketBase service is healthy.
 - `photos.image` has `hdrThumbs=true` and `hdrThumbsPolicy=require`.
-- `pocketbase gallery-thumbs backfill --workers=4` reports `failed=0`.
+- `pocketbase gallery-thumbs backfill --workers=1` reports `failed=0`.
 - R2 contains all three `uhdr-pjpeg-v1` objects for every published photo.
 - Objects have immutable cache control and `pocketbase-thumb-generation=uhdr-pjpeg-v1` metadata.
 - First primary SOF is `FFC2`, with multiple primary SOS scans and 4:2:0 sampling.
@@ -101,9 +101,13 @@ rerun. Unsupported sources keep their existing preview. Failures and active
 leases are reported separately and can be retried. Draft manifests stay hidden.
 
 The server runs the same job for published records every ten minutes with one
-worker. Set `PB_GALLERY_TILES_BACKGROUND=0` on the service to disable the scheduled
-job while running a manual backfill on a memory-constrained host. Restore the
-normal schedule after the backfill. For newly deployed versions, also run
+worker. Native tile rendering and thumbnail generation share the service's
+`PB_THUMBS_MAX_WORKERS` limit. Set it to `1` on memory-constrained hosts.
+
+Manual backfills run in separate processes. On a memory-constrained host, disable
+the scheduled job with `PB_GALLERY_TILES_BACKGROUND=0` and run manual jobs one
+at a time with `--workers=1`. Avoid concurrent thumbnail generation on the service
+during backfills. Restore the normal schedule after the jobs complete. Run
 `gallery-thumbs backfill --workers=1` if existing whole-image variants need repair.
 
 PocketBase writes a matching preview and overlapping tile levels to its existing

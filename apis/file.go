@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path"
+	"slices"
 	"strings"
 
 	"github.com/pocketbase/pocketbase/core"
@@ -106,19 +108,26 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 		}
 	}
 
-	baseFilesPath := record.BaseFilesPath()
+	fileRecord := record
 	effectiveFileField := fileField
 
 	// fetch the original view file field related record
 	if collection.IsView() {
-		fileRecord, err := e.App.FindRecordByViewFile(collection.Id, fileField.Name, filename)
+		fileRecord, err = e.App.FindRecordByViewFile(collection.Id, fileField.Name, filename)
 		if err != nil {
 			return e.NotFoundError("", fmt.Errorf("failed to fetch view file field record: %w", err))
 		}
-		baseFilesPath = fileRecord.BaseFilesPath()
 		if sourceFileField := fileRecord.FindFileFieldByFile(filename); sourceFileField != nil {
 			effectiveFileField = sourceFileField
 		}
+	}
+
+	// Match the stored gallery image even when requested through a view.
+	originalDownloadDisabled := fileRecord.Collection().Name == "photos" && slices.Contains(fileRecord.GetStringSlice("image"), filename)
+	thumbSize := e.Request.URL.Query().Get("thumb")
+	selectedThumbSize, shouldHandleThumb := selectThumbSize(collection.Name, thumbSize, availableThumbSizes(effectiveFileField.Thumbs))
+	if originalDownloadDisabled && !shouldHandleThumb {
+		return e.NotFoundError("", nil)
 	}
 
 	fsys, err := e.App.NewFilesystem()
@@ -127,6 +136,7 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 	}
 	defer fsys.Close()
 
+	baseFilesPath := fileRecord.BaseFilesPath()
 	originalPath := baseFilesPath + "/" + filename
 
 	event := new(core.FileDownloadRequestEvent)
@@ -137,9 +147,6 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 	event.ServedPath = originalPath
 	event.ServedName = filename
 
-	// check for valid thumb size param
-	thumbSize := e.Request.URL.Query().Get("thumb")
-	selectedThumbSize, shouldHandleThumb := selectThumbSize(collection.Name, thumbSize, availableThumbSizes(effectiveFileField.Thumbs))
 	if shouldHandleThumb {
 		// extract the original file meta attributes and check it existence
 		oAttrs, oAttrsErr := fsys.Attributes(originalPath)
@@ -223,6 +230,9 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 					if hdrRequired && isHDRSource && isHDRThumbError(thumbErr) {
 						return e.BadRequestError("HDR thumbnail generation required but unavailable.", thumbErr)
 					}
+					if originalDownloadDisabled {
+						return e.NotFoundError("", thumbErr)
+					}
 
 					e.App.Logger().Warn(
 						"Fallback to original - failed to create thumb "+event.ServedName,
@@ -240,6 +250,10 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 		}
 	}
 
+	if originalDownloadDisabled && event.ServedPath == originalPath {
+		return e.NotFoundError("", nil)
+	}
+
 	if thumbSize != "" && event.ThumbError == nil && event.ServedPath == originalPath {
 		event.ThumbError = fmt.Errorf("the thumb size %q or the original file format are not supported", thumbSize)
 	}
@@ -254,6 +268,10 @@ func (api *fileApi) download(e *core.RequestEvent) error {
 	e.Response.Header().Del("X-Frame-Options")
 
 	return e.App.OnFileDownloadRequest().Trigger(event, func(e *core.FileDownloadRequestEvent) error {
+		if originalDownloadDisabled && path.Clean("/"+e.ServedPath) == "/"+originalPath {
+			e.Response.Header().Del("Cache-Control")
+			return e.NotFoundError("", nil)
+		}
 		err = execAfterSuccessTx(true, e.App, func() error {
 			return fsys.Serve(e.Response, e.Request, e.ServedPath, e.ServedName)
 		})

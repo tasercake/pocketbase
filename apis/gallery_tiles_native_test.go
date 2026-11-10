@@ -4,14 +4,36 @@ package apis
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 	"github.com/pocketbase/pocketbase/tools/router"
 )
+
+func TestGalleryTilesWaitForThumbnailWorkerPermit(t *testing.T) {
+	app, record := newGalleryTileTestPhoto(t, smallJPEG(t), false)
+	t.Setenv("HDRTHUMB_HELPER", filepath.Join(t.TempDir(), "missing-helper"))
+
+	sem := sharedThumbMaterializer.sem
+	var permits int64
+	for sem.TryAcquire(1) {
+		permits++
+	}
+	defer sem.Release(permits)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	generated, err := materializeGalleryTiles(ctx, app, record)
+	if generated || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected waiting tile render to time out, got %v, %v", generated, err)
+	}
+}
 
 func TestGalleryTilesBackfillRetriesFailuresAndExposesOnlyPublishedSets(t *testing.T) {
 	source, err := os.ReadFile("../tests/data/hdr/current-photo-1.jpg")

@@ -89,6 +89,15 @@ func (m *thumbMaterializer) createThumb(ctx context.Context, fsys *filesystem.Sy
 	return res.Err
 }
 
+func (m *thumbMaterializer) renderTiles(ctx context.Context, inputPath, outputDir string, hdr bool) (hdrthumb.TilePyramid, error) {
+	if err := m.sem.Acquire(ctx, 1); err != nil {
+		return hdrthumb.TilePyramid{}, err
+	}
+	defer m.sem.Release(1)
+
+	return hdrthumb.RenderTilesContext(ctx, inputPath, outputDir, hdr)
+}
+
 func (m *thumbMaterializer) detectHDRSource(fsys *filesystem.System, originalPath string, contentType string) (hdrthumb.Detection, error) {
 	return detectHDRObject(fsys, originalPath, contentType)
 }
