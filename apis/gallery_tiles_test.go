@@ -1,14 +1,104 @@
 package apis
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/jpeg"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
+	"github.com/pocketbase/pocketbase/tools/hdrthumb"
 	"github.com/pocketbase/pocketbase/tools/router"
 )
+
+func TestUploadGalleryTilesStopsNewWritesAndWaitsForActiveWrites(t *testing.T) {
+	const concurrent = 8
+	p := hdrthumb.TilePyramid{Width: 3000, Height: 520, PreviewWidth: 2000, PreviewHeight: 347}
+	dir := t.TempDir()
+	if err := forEachGalleryTile(p, func(name string, width, height int) error {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return err
+		}
+		var data bytes.Buffer
+		if err := jpeg.Encode(&data, image.NewGray(image.Rect(0, 0, width, height)), nil); err != nil {
+			return err
+		}
+		return os.WriteFile(path, data.Bytes(), 0600)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{}, 20)
+	fail, finish := make(chan struct{}), make(chan struct{})
+	sendFailures := sync.OnceFunc(func() { close(fail) })
+	finishLastWrite := sync.OnceFunc(func() { close(finish) })
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		index := requests.Add(1)
+		started <- struct{}{}
+		<-fail
+		if index == 1 {
+			<-finish
+			return
+		}
+		http.Error(w, "upload failed", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	fsys, err := filesystem.NewS3("tiles", "auto", server.URL, "access", "secret", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	fsys.SetContext(ctx)
+
+	var uploadErr error
+	done := make(chan struct{})
+	go func() {
+		uploadErr = uploadGalleryTiles(ctx, fsys, "test", dir, p, false)
+		close(done)
+	}()
+	defer func() {
+		sendFailures()
+		finishLastWrite()
+		<-done
+	}()
+	for i := range concurrent {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatalf("only %d of %d concurrent uploads started", i, concurrent)
+		}
+	}
+	sendFailures()
+	select {
+	case <-done:
+		t.Fatal("upload returned before active writes finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	finishLastWrite()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("upload did not return after active writes finished")
+	}
+	if uploadErr == nil || requests.Load() != concurrent {
+		t.Fatalf("got %d writes and error %v, want %d writes and an error", requests.Load(), uploadErr, concurrent)
+	}
+}
 
 func newGalleryTileTestPhoto(t *testing.T, data []byte, published bool) (*core.BaseApp, *core.Record) {
 	t.Helper()

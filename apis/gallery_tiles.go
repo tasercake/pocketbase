@@ -20,6 +20,7 @@ import (
 	"github.com/pocketbase/pocketbase/tools/filesystem"
 	"github.com/pocketbase/pocketbase/tools/filesystem/blob"
 	"github.com/pocketbase/pocketbase/tools/hdrthumb"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -32,6 +33,7 @@ const (
 	galleryTileMaxPixels    = 100_000_000
 	galleryTileMaxSource    = 250 << 20
 	galleryTileTimeout      = 15 * time.Minute
+	galleryTileUploadLimit  = 8
 )
 
 type galleryTileSet struct {
@@ -145,24 +147,44 @@ func forEachGalleryTile(p hdrthumb.TilePyramid, visit func(string, int, int) err
 	return nil
 }
 
-func uploadGalleryTiles(fsys *filesystem.System, prefix, outputDir string, p hdrthumb.TilePyramid, hdr bool) error {
-	return forEachGalleryTile(p, func(name string, width, height int) error {
-		data, err := os.ReadFile(filepath.Join(outputDir, filepath.FromSlash(name)))
-		if err != nil {
+func uploadGalleryTiles(ctx context.Context, fsys *filesystem.System, prefix, outputDir string, p hdrthumb.TilePyramid, hdr bool) error {
+	uploads, scheduleCtx := errgroup.WithContext(ctx)
+	uploads.SetLimit(galleryTileUploadLimit)
+	enumerateErr := forEachGalleryTile(p, func(name string, width, height int) error {
+		if err := scheduleCtx.Err(); err != nil {
 			return err
 		}
-		cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
-		if err != nil || cfg.Width != width || cfg.Height != height {
-			return fmt.Errorf("unexpected JPEG dimensions for %s: %dx%d, want %dx%d", name, cfg.Width, cfg.Height, width, height)
-		}
-		detection, err := hdrthumb.DetectBytes(data, "image/jpeg")
-		if err != nil || (hdr && detection.Kind != hdrthumb.KindUltraHDRJPEG) || (!hdr && detection.Kind != hdrthumb.KindNone) {
-			return fmt.Errorf("unexpected dynamic range for tile %s: %v", name, detection.Kind)
-		}
-		return fsys.UploadWithOptions(data, prefix+"/"+name, &blob.WriterOptions{
-			ContentType: "image/jpeg", CacheControl: galleryHDRThumbCacheControl,
+		uploads.Go(func() error {
+			if err := scheduleCtx.Err(); err != nil {
+				return err
+			}
+			data, err := os.ReadFile(filepath.Join(outputDir, filepath.FromSlash(name)))
+			if err != nil {
+				return err
+			}
+			cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
+			if err != nil || cfg.Width != width || cfg.Height != height {
+				return fmt.Errorf("unexpected JPEG dimensions for %s: %dx%d, want %dx%d", name, cfg.Width, cfg.Height, width, height)
+			}
+			detection, err := hdrthumb.DetectBytes(data, "image/jpeg")
+			if err != nil || (hdr && detection.Kind != hdrthumb.KindUltraHDRJPEG) || (!hdr && detection.Kind != hdrthumb.KindNone) {
+				return fmt.Errorf("unexpected dynamic range for tile %s: %v", name, detection.Kind)
+			}
+			if err := scheduleCtx.Err(); err != nil {
+				return err
+			}
+			// The filesystem keeps the generation context so writes in progress
+			// can finish before cleanup after a peer fails.
+			return fsys.UploadWithOptions(data, prefix+"/"+name, &blob.WriterOptions{
+				ContentType: "image/jpeg", CacheControl: galleryHDRThumbCacheControl,
+			})
 		})
+		return nil
 	})
+	if err := uploads.Wait(); err != nil {
+		return err
+	}
+	return enumerateErr
 }
 
 // Claim a unique generation per image. A timed-out process can be retried, and
@@ -287,7 +309,7 @@ func materializeGalleryTiles(ctx context.Context, app core.App, record *core.Rec
 		return false, err
 	}
 	uploading = true
-	if err := uploadGalleryTiles(fsys, prefix, dir, pyramid, hdr); err != nil {
+	if err := uploadGalleryTiles(ctx, fsys, prefix, dir, pyramid, hdr); err != nil {
 		return false, err
 	}
 	if err := ctx.Err(); err != nil {
