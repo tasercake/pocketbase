@@ -200,10 +200,13 @@ func (s *System) List(prefix string) ([]*blob.ListObject, error) {
 
 // Upload writes content into the fileKey location.
 func (s *System) Upload(content []byte, fileKey string) error {
-	opts := &blob.WriterOptions{
+	return s.UploadWithOptions(content, fileKey, &blob.WriterOptions{
 		ContentType: mimetype.Detect(content).String(),
-	}
+	})
+}
 
+// UploadWithOptions writes content with the supplied blob metadata.
+func (s *System) UploadWithOptions(content []byte, fileKey string, opts *blob.WriterOptions) error {
 	w, writerErr := s.bucket.NewWriter(s.ctx, fileKey, opts)
 	if writerErr != nil {
 		return writerErr

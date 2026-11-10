@@ -28,3 +28,8 @@ func Probe(input []byte) (ProbeResult, error) {
 func ProbeContext(ctx context.Context, input []byte) (ProbeResult, error) {
 	return ProbeResult{}, ErrHDRBackendUnavailable
 }
+
+// RenderTilesContext requires the native libultrahdr backend.
+func RenderTilesContext(ctx context.Context, inputPath, outputDir string, hdr bool) (TilePyramid, error) {
+	return TilePyramid{}, ErrHDRBackendUnavailable
+}

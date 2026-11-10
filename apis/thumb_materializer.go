@@ -148,6 +148,9 @@ func exposeMaterializedGalleryPhoto(app core.App, record *core.Record) error {
 }
 
 func attachGalleryPhotoURLs(e *core.RequestEvent, records ...*core.Record) error {
+	if err := attachGalleryTileURLs(e, records); err != nil {
+		return err
+	}
 	var misses []*core.Record
 	for _, record := range records {
 		if !isPublishedPhotoRecord(record) {

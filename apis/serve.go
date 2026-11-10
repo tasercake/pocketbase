@@ -214,6 +214,8 @@ func Serve(app core.App, config ServeConfig) error {
 	serveEvent.InstallerFunc = DefaultInstallerFunc
 
 	// trigger the OnServe hook and start the tcp listener
+	registerGalleryTileBackfill(app)
+
 	serveHookErr := app.OnServe().Trigger(serveEvent, func(e *core.ServeEvent) error {
 		handler, err := e.Router.BuildMux()
 		if err != nil {
